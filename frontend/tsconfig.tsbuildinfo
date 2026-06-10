@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/api/client.ts","./src/components/common.tsx","./src/pages/analytics.tsx","./src/pages/candidatedetail.tsx","./src/pages/candidatesdashboard.tsx","./src/pages/jobsetup.tsx","./src/pages/jobslist.tsx"],"version":"5.9.3"}
