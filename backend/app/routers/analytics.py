@@ -4,10 +4,11 @@ from __future__ import annotations
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.deps import CurrentUser
 from app.models import Candidate, CandidateStage, Job, ScoreStatus
 from app.schemas import AnalyticsOut
 
@@ -15,8 +16,11 @@ router = APIRouter(prefix="/jobs", tags=["analytics"])
 
 
 @router.get("/{job_id}/analytics", response_model=AnalyticsOut)
-def job_analytics(job_id: int, db: Session = Depends(get_db)) -> AnalyticsOut:
-    if db.get(Job, job_id) is None:
+def job_analytics(
+    job_id: int, user: CurrentUser, db: Session = Depends(get_db)
+) -> AnalyticsOut:
+    job = db.get(Job, job_id)
+    if job is None or job.tenant_id != user.tenant_id:
         raise HTTPException(404, "Job not found")
 
     rows = db.scalars(select(Candidate).where(Candidate.job_id == job_id)).all()
@@ -41,6 +45,16 @@ def job_analytics(job_id: int, db: Session = Depends(get_db)) -> AnalyticsOut:
         {"keyword": kw, "count": n} for kw, n in missing.most_common(10)
     ]
 
+    # Cascade efficiency: how many candidates exited at each tier, the share
+    # that hit a prompt cache, and the summed estimated cost.
+    tier_distribution: dict[str, int] = {"0": 0, "1": 0, "2": 0, "3": 0}
+    for r in rows:
+        key = str(r.tier_reached if r.tier_reached is not None else 0)
+        tier_distribution[key] = tier_distribution.get(key, 0) + 1
+    cache_hits = sum(1 for r in rows if r.cache_hit)
+    cache_hit_rate = round(cache_hits / total, 3) if total else 0.0
+    est_total_cost = round(sum(r.est_cost_usd or 0.0 for r in rows), 4)
+
     return AnalyticsOut(
         job_id=job_id,
         total=total,
@@ -53,4 +67,7 @@ def job_analytics(job_id: int, db: Session = Depends(get_db)) -> AnalyticsOut:
         avg_job_match_pct=_avg([r.job_match_pct for r in rows]),
         stage_counts=stage_counts,
         top_missing_keywords=top_missing,
+        tier_distribution=tier_distribution,
+        cache_hit_rate=cache_hit_rate,
+        est_total_cost_usd=est_total_cost,
     )

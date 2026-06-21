@@ -5,7 +5,7 @@ The real AnthropicLLMService is exercised only by the optional smoke test
 prompt-building helper and that a fake conforming to the LLMService protocol
 works as the pipeline expects.
 """
-from app.schemas import CandidateScoreLLM, PreFilterLLM, ScoringCriteriaLLM
+from app.schemas import CandidateScoreLLM, QuickScoreLLM, ScoringCriteriaLLM
 from app.services import llm
 
 
@@ -31,9 +31,9 @@ def test_criteria_summary_handles_empty():
 
 
 class FakeLLM:
-    """Conforms to the LLMService protocol for pipeline tests."""
+    """Conforms to the (cascade) LLMService protocol for pipeline tests."""
 
-    def extract_criteria(self, jd_text: str) -> ScoringCriteriaLLM:
+    def extract_criteria(self, jd_text: str, db=None, tenant_id=1) -> ScoringCriteriaLLM:
         return ScoringCriteriaLLM(
             required_skills=["Python", "FastAPI"],
             preferred_skills=["React"],
@@ -41,10 +41,16 @@ class FakeLLM:
             must_haves=["Bachelor's degree"],
         )
 
-    def prefilter(self, criteria_summary: str, cv_text: str) -> PreFilterLLM:
-        return PreFilterLLM(relevant="python" in cv_text.lower(), reason="keyword check")
+    def quick_score(self, criteria_summary: str, cv_text: str, db=None, tenant_id=1) -> QuickScoreLLM:
+        relevant = "python" in cv_text.lower()
+        return QuickScoreLLM(
+            match_pct=60.0 if relevant else 5.0,
+            confidence=0.9 if relevant else 0.95,
+            top_gaps=["React"],
+            summary="keyword check",
+        )
 
-    def deep_score(self, criteria_summary: str, cv_text: str) -> CandidateScoreLLM:
+    def deep_score(self, criteria_summary: str, cv_text: str, db=None, tenant_id=1) -> CandidateScoreLLM:
         return CandidateScoreLLM(
             overall_score=8.0,
             job_match_pct=82.0,
@@ -53,13 +59,18 @@ class FakeLLM:
             reasoning="Strong backend match.",
         )
 
+    def embed(self, text: str, db=None, tenant_id=1):
+        return None
+
 
 def test_fake_llm_satisfies_protocol():
     fake: llm.LLMService = FakeLLM()
     crit = fake.extract_criteria("some JD")
     assert crit.required_skills == ["Python", "FastAPI"]
-    assert fake.prefilter("c", "I know Python").relevant is True
-    assert fake.prefilter("c", "I cook food").relevant is False
+    q_yes = fake.quick_score("c", "I know Python")
+    q_no = fake.quick_score("c", "I cook food")
+    assert q_yes.match_pct > q_no.match_pct
+    assert 0 <= q_yes.confidence <= 1
     score = fake.deep_score("c", "Python dev")
     assert 1 <= score.overall_score <= 10
     assert 0 <= score.job_match_pct <= 100

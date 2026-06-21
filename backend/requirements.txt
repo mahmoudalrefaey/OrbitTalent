@@ -9,13 +9,21 @@ pydantic-settings==2.7.0
 
 # Database
 SQLAlchemy==2.0.36
+alembic==1.14.0
+# PostgreSQL driver (psycopg 3). SQLite needs no driver.
+psycopg[binary]==3.2.3
 
 # CV parsing
 pdfplumber==0.11.5
 python-docx==1.1.2
 
-# LLM
-anthropic==0.109.1
+# LLM (OpenAI-compatible client — used against the g0i.ai /v1 endpoint)
+openai==1.59.6
+
+# Auth
+bcrypt==5.0.0
+PyJWT==2.10.1
+email-validator==2.2.0
 
 # Testing
 pytest==8.3.4

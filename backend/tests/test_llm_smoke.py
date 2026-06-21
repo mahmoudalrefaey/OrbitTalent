@@ -1,18 +1,18 @@
-"""Optional real-API smoke test. Skipped unless ANTHROPIC_API_KEY is set.
+"""Optional real-API smoke test. Skipped unless LLM_API_KEY is set.
 
-Run explicitly with:  ANTHROPIC_API_KEY=sk-... pytest tests/test_llm_smoke.py -s
+Run explicitly with:  LLM_API_KEY=sk-... pytest tests/test_llm_smoke.py -s
 
-Verifies JD extraction and deep scoring produce valid Pydantic objects, and
-that the per-job criteria block is served from cache on the 2nd CV of a batch
-(cache_read_input_tokens > 0), proving the prompt-caching design works.
+Verifies that JD extraction and deep scoring against the configured provider
+(g0i.ai, OpenAI-compatible) produce valid Pydantic objects via the JSON
+structured-output path.
 """
 import os
 
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set; skipping live LLM smoke test.",
+    not (os.environ.get("LLM_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")),
+    reason="LLM_API_KEY not set; skipping live LLM smoke test.",
 )
 
 JD = """\

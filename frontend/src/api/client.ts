@@ -49,6 +49,10 @@ export interface Candidate {
   score_status: ScoreStatus;
   error: string;
   created_at: string;
+  // Cascade telemetry.
+  tier_reached: number;
+  cache_hit: boolean;
+  est_cost_usd: number;
 }
 
 export interface CandidateDetail extends Candidate {
@@ -67,11 +71,60 @@ export interface Analytics {
   avg_job_match_pct: number | null;
   stage_counts: Record<string, number>;
   top_missing_keywords: { keyword: string; count: number }[];
+  tier_distribution: Record<string, number>;
+  cache_hit_rate: number;
+  est_total_cost_usd: number;
+}
+
+export interface UsagePerDay {
+  date: string;
+  cost_usd: number;
+  calls: number;
+  cached_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
+export interface Usage {
+  provider: string;
+  today_cost_usd: number;
+  last_7_days_cost_usd: number;
+  total_calls: number;
+  cache_hit_rate: number;
+  by_day: UsagePerDay[];
+  by_tier: Record<string, number>;
+  by_model: Record<string, number>;
+}
+
+export interface Health {
+  status: string;
+  llm_enabled: boolean;
+  provider: string;
+  today_cost_usd: number;
+}
+
+export interface User {
+  id: number;
+  email: string;
+  name: string;
+  tenant_id: number;
+  created_at: string;
+}
+
+/** Error carrying the HTTP status so callers can react to 401 etc. */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+    this.name = "ApiError";
+  }
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
+    credentials: "include", // send/receive the session cookie
     ...init,
   });
   if (!res.ok) {
@@ -82,13 +135,28 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* ignore */
     }
-    throw new Error(detail);
+    throw new ApiError(res.status, detail);
   }
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
 
 export const api = {
-  health: () => req<{ status: string; llm_enabled: boolean }>("/health"),
+  health: () => req<Health>("/health"),
+  usage: () => req<Usage>("/usage"),
+
+  // --- Auth ---
+  register: (email: string, password: string, name: string) =>
+    req<User>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ email, password, name }),
+    }),
+  login: (email: string, password: string) =>
+    req<User>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    }),
+  logout: () => req<void>("/auth/logout", { method: "POST" }),
+  me: () => req<User>("/auth/me"),
 
   listJobs: () => req<Job[]>("/jobs"),
   createJob: (title: string, jd_text: string) =>
@@ -119,6 +187,7 @@ export const api = {
     const res = await fetch(`${BASE}/jobs/${jobId}/candidates`, {
       method: "POST",
       body: form,
+      credentials: "include",
     });
     if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText);
     return res.json();

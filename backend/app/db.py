@@ -8,14 +8,24 @@ from app.config import get_settings
 
 settings = get_settings()
 
-# check_same_thread is a SQLite-only flag; harmless to pass conditionally.
-connect_args = (
-    {"check_same_thread": False}
-    if settings.database_url.startswith("sqlite")
-    else {}
-)
+_is_sqlite = settings.database_url.startswith("sqlite")
 
-engine = create_engine(settings.database_url, connect_args=connect_args)
+if _is_sqlite:
+    # check_same_thread is a SQLite-only flag (single-file dev DB).
+    engine = create_engine(
+        settings.database_url, connect_args={"check_same_thread": False}
+    )
+else:
+    # Production (Postgres): real connection pool with liveness checks so a
+    # recycled/stale connection doesn't surface as an error to a request.
+    engine = create_engine(
+        settings.database_url,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+    )
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -33,16 +43,14 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """Create tables and seed the default tenant. Idempotent."""
+    """Create tables. Idempotent.
+
+    No longer seeds a default tenant: with per-user tenants each user creates
+    their own on signup. Seeding an explicit id=1 row also desynced the
+    Postgres SERIAL sequence (the sequence isn't advanced by explicit-id
+    inserts), causing duplicate-key errors on the first real registration.
+    """
     # Import models so they register on Base.metadata before create_all.
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
-
-    with SessionLocal() as db:
-        existing = db.get(models.Tenant, models.DEFAULT_TENANT_ID)
-        if existing is None:
-            db.add(
-                models.Tenant(id=models.DEFAULT_TENANT_ID, name="Default")
-            )
-            db.commit()

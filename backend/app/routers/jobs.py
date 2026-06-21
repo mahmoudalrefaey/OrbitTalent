@@ -6,8 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.deps import CurrentUser
 from app.models import (
-    DEFAULT_TENANT_ID,
     Candidate,
     Job,
     JobStatus,
@@ -24,6 +24,18 @@ from app.schemas import (
 from app.services import llm
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+def _get_owned_job(db: Session, job_id: int, tenant_id: int) -> Job:
+    """Fetch a job that belongs to the caller's tenant, or 404.
+
+    Using 404 (not 403) for cross-tenant access avoids leaking the existence
+    of other tenants' jobs (IDOR-safe).
+    """
+    job = db.get(Job, job_id)
+    if job is None or job.tenant_id != tenant_id:
+        raise HTTPException(404, "Job not found")
+    return job
 
 
 def _to_job_out(db: Session, job: Job) -> JobOut:
@@ -44,9 +56,11 @@ def _to_job_out(db: Session, job: Job) -> JobOut:
 
 
 @router.post("", response_model=JobOut, status_code=status.HTTP_201_CREATED)
-def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> JobOut:
+def create_job(
+    payload: JobCreate, user: CurrentUser, db: Session = Depends(get_db)
+) -> JobOut:
     job = Job(
-        tenant_id=DEFAULT_TENANT_ID,
+        tenant_id=user.tenant_id,
         title=payload.title,
         jd_text=payload.jd_text,
         status=JobStatus.draft,
@@ -58,16 +72,20 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> JobOut:
 
 
 @router.get("", response_model=list[JobOut])
-def list_jobs(db: Session = Depends(get_db)) -> list[JobOut]:
-    jobs = db.scalars(select(Job).order_by(Job.created_at.desc())).all()
+def list_jobs(user: CurrentUser, db: Session = Depends(get_db)) -> list[JobOut]:
+    jobs = db.scalars(
+        select(Job)
+        .where(Job.tenant_id == user.tenant_id)
+        .order_by(Job.created_at.desc())
+    ).all()
     return [_to_job_out(db, j) for j in jobs]
 
 
 @router.get("/{job_id}", response_model=JobDetailOut)
-def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetailOut:
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(404, "Job not found")
+def get_job(
+    job_id: int, user: CurrentUser, db: Session = Depends(get_db)
+) -> JobDetailOut:
+    job = _get_owned_job(db, job_id, user.tenant_id)
     base = _to_job_out(db, job).model_dump()
     crit = job.criteria
     base["criteria"] = CriteriaOut.model_validate(crit) if crit else None
@@ -78,12 +96,11 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetailOut:
 def extract_criteria(
     job_id: int,
     payload: ExtractCriteriaRequest,
+    user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> CriteriaOut:
-    """Call Claude to extract structured criteria from the JD."""
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(404, "Job not found")
+    """Call the LLM to extract structured criteria from the JD."""
+    job = _get_owned_job(db, job_id, user.tenant_id)
 
     jd = payload.jd_text if payload.jd_text is not None else job.jd_text
     if not jd.strip():
@@ -94,7 +111,7 @@ def extract_criteria(
     except llm.LLMUnavailableError as exc:
         raise HTTPException(503, str(exc)) from exc
 
-    extracted = service.extract_criteria(jd)
+    extracted = service.extract_criteria(jd, db=db, tenant_id=user.tenant_id)
 
     crit = job.criteria
     if crit is None:
@@ -121,12 +138,13 @@ def extract_criteria(
 
 @router.put("/{job_id}/criteria", response_model=CriteriaOut)
 def update_criteria(
-    job_id: int, payload: CriteriaBase, db: Session = Depends(get_db)
+    job_id: int,
+    payload: CriteriaBase,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
 ) -> CriteriaOut:
     """HR-edited criteria (after reviewing extraction)."""
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(404, "Job not found")
+    job = _get_owned_job(db, job_id, user.tenant_id)
 
     crit = job.criteria
     if crit is None:

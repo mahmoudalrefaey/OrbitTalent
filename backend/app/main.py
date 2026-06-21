@@ -6,7 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.db import init_db
-from app.routers import analytics, candidates, jobs
+from app.routers import analytics, auth, candidates, jobs, usage
+from app.schemas import HealthOut
 
 settings = get_settings()
 
@@ -27,11 +28,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(jobs.router)
 app.include_router(candidates.router)
 app.include_router(analytics.router)
+app.include_router(usage.router)
 
 
-@app.get("/health")
-def health() -> dict:
-    return {"status": "ok", "llm_enabled": settings.llm_enabled}
+@app.get("/health", response_model=HealthOut)
+def health() -> HealthOut:
+    # Public endpoint (pre-login). Per-tenant cost lives behind /usage.
+    return HealthOut(
+        status="ok",
+        llm_enabled=settings.llm_enabled,
+        provider=settings.provider,
+        today_cost_usd=0.0,
+    )

@@ -15,7 +15,11 @@ import io  # noqa: E402  (after the env setup above, intentionally)
 _TEST_DB_FD, _TEST_DB_PATH = tempfile.mkstemp(suffix=".db", prefix="orbittalent_test_")
 os.close(_TEST_DB_FD)
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH}"
+# No real key in tests — extract-criteria must 503, and LLM is patched per-test.
 os.environ.setdefault("ANTHROPIC_API_KEY", "")
+os.environ.setdefault("LLM_API_KEY", "")
+# Deterministic signing secret for auth tests.
+os.environ.setdefault("JWT_SECRET", "test-secret-key")
 
 
 CLEAN_CV_TEXT = """\

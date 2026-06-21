@@ -1,19 +1,26 @@
 """Per-CV scoring pipeline orchestration.
 
-Flow for one candidate (see plan):
-  parse -> ATS score -> keyword match -> cheap pre-filter gate -> deep score.
+Flow for one candidate:
+  parse -> ATS score -> keyword match -> cascade (Tier 0..3).
 
-Deterministic steps always run. LLM steps run only when an LLMService is
-provided (i.e. an API key is configured); without it, candidates keep their
-ATS + keyword results and are left in `pending` deep-score state so the value
-of the deterministic layer is still visible.
+Deterministic steps (parse/ATS/keyword) always run. The cascade runs only when
+an LLMService is provided (i.e. an API key is configured); without it,
+candidates keep their ATS + keyword results and are left in `pending` so the
+value of the deterministic layer is still visible.
+
+The cascade is cost-optimized: see app.services.cascade. Per-candidate cost is
+summed from the usage rows written during this candidate's run and stored on
+the row for the analytics dashboard.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Candidate, Job, ScoreStatus
-from app.services import keyword_matcher, llm
+from app.models import Candidate, Job, ScoreStatus, UsageRecord
+from app.services import cascade, keyword_matcher, llm
 from app.services.ats_scorer import score_ats
 from app.services.cv_parser import parse_cv
 
@@ -22,7 +29,6 @@ def _all_keywords(job: Job) -> list[str]:
     c = job.criteria
     if c is None:
         return []
-    # required + preferred + must_haves, de-duplicated, order preserved.
     seen: dict[str, None] = {}
     for kw in (*c.required_skills, *c.preferred_skills, *c.must_haves):
         if kw and kw.strip():
@@ -30,16 +36,25 @@ def _all_keywords(job: Job) -> list[str]:
     return list(seen)
 
 
+def _cost_since(db: Session, started_at: datetime) -> float:
+    """Sum usage cost recorded since `started_at` (this candidate's spend)."""
+    rows = db.scalars(
+        select(UsageRecord).where(UsageRecord.created_at >= started_at)
+    ).all()
+    return round(sum(r.cost_usd for r in rows), 6)
+
+
 def process_candidate(
     db: Session,
     candidate_id: int,
     file_bytes: bytes,
     llm_service: llm.LLMService | None,
+    job_embedding: list[float] | None = None,
 ) -> None:
     """Run the full pipeline for one candidate and persist results.
 
-    Safe to call in a background task: it opens nothing it doesn't close and
-    records failures on the row rather than raising.
+    Safe to call in a background task: records failures on the row rather than
+    raising. `job_embedding` may be precomputed once per batch and passed in.
     """
     candidate = db.get(Candidate, candidate_id)
     if candidate is None:
@@ -47,6 +62,7 @@ def process_candidate(
 
     candidate.score_status = ScoreStatus.processing
     db.commit()
+    started_at = datetime.now(timezone.utc)
 
     try:
         # 1. Parse.
@@ -74,8 +90,9 @@ def process_candidate(
         # Without an LLM, stop after the deterministic layer.
         if llm_service is None:
             candidate.score_status = ScoreStatus.pending
+            candidate.tier_reached = 0
             candidate.reasoning = (
-                "Deterministic scoring complete. Configure ANTHROPIC_API_KEY for "
+                "Deterministic scoring complete. Configure LLM_API_KEY for "
                 "AI deep scoring (overall score, job-match %, reasoning)."
             )
             db.commit()
@@ -90,29 +107,33 @@ def process_candidate(
             crit.weights if crit else {},
         )
 
-        # 4. Cheap pre-filter gate.
-        gate = llm_service.prefilter(summary, parsed.text)
-        if not gate.relevant:
-            candidate.score_status = ScoreStatus.filtered_out
-            candidate.overall_score = 1.0
-            candidate.job_match_pct = 0.0
-            candidate.reasoning = f"Filtered out at pre-screen: {gate.reason}"
-            db.commit()
-            return
+        # 4. Cascade (Tier 0..3).
+        result = cascade.run_cascade(
+            llm_service,
+            criteria_summary=summary,
+            required_skills=crit.required_skills if crit else [],
+            cv_text=parsed.text,
+            matched_keywords=km.matched,
+            missing_keywords=km.missing,
+            job_embedding=job_embedding,
+            db=db,
+            tenant_id=candidate.tenant_id,
+        )
 
-        # 5. Deep score (Opus).
-        score = llm_service.deep_score(summary, parsed.text)
-        candidate.overall_score = score.overall_score
-        candidate.job_match_pct = score.job_match_pct
-        candidate.reasoning = score.reasoning
-        # Merge LLM-found keywords with deterministic matches (union).
-        if score.matched_keywords:
-            candidate.matched_keywords = sorted(
-                set(candidate.matched_keywords) | set(score.matched_keywords)
-            )
-        if score.missing_keywords:
-            candidate.missing_keywords = score.missing_keywords
-        candidate.score_status = ScoreStatus.scored
+        candidate.score_status = result.status
+        candidate.tier_reached = result.tier_reached
+        candidate.overall_score = result.overall_score
+        candidate.job_match_pct = result.job_match_pct
+        candidate.reasoning = result.reasoning
+        candidate.matched_keywords = result.matched_keywords
+        candidate.missing_keywords = result.missing_keywords
+
+        # 5. Cost + cache telemetry for this candidate.
+        rows = db.scalars(
+            select(UsageRecord).where(UsageRecord.created_at >= started_at)
+        ).all()
+        candidate.est_cost_usd = round(sum(r.cost_usd for r in rows), 6)
+        candidate.cache_hit = any(r.cached_tokens > 0 for r in rows)
         db.commit()
 
     except Exception as exc:  # noqa: BLE001 — one bad CV must not sink the batch

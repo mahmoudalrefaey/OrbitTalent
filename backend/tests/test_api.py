@@ -9,12 +9,23 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+def register_user(client: TestClient, email="user@example.com", password="password123", name="Test"):
+    """Register a user; the TestClient stores the returned session cookie."""
+    r = client.post(
+        "/auth/register",
+        json={"email": email, "password": password, "name": name},
+    )
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
 @pytest.fixture
 def client():
-    """One app instance against the temp DB configured in conftest.
+    """Authenticated app client against the temp DB configured in conftest.
 
-    Each test gets a clean schema: drop + recreate all tables, reseed the
-    default tenant. LLM is patched per-test via _use_fake_llm.
+    Each test gets a clean schema, then registers + logs in a default user so
+    the session cookie is present on the client for all app endpoints. LLM is
+    patched per-test via _use_fake_llm.
     """
     import app.services.llm as llm_mod
     from app.db import Base, engine, init_db
@@ -28,6 +39,7 @@ def client():
 
     with TestClient(app) as c:
         c._llm_mod = llm_mod
+        register_user(c)  # sets ot_session cookie on the client
         yield c
 
 
@@ -38,7 +50,14 @@ _real_get_llm_service = _llm_for_capture.get_llm_service
 
 
 class FakeLLM:
-    def extract_criteria(self, jd_text):
+    """Conforms to the new (cascade) LLMService protocol.
+
+    quick_score returns LOW confidence so the cascade escalates to deep_score,
+    letting the existing end-to-end assertions (overall=8.0) hold. embed is
+    disabled (returns None) so Tier 1 is skipped.
+    """
+
+    def extract_criteria(self, jd_text, db=None, tenant_id=1):
         from app.schemas import ScoringCriteriaLLM
         return ScoringCriteriaLLM(
             required_skills=["Python", "FastAPI"],
@@ -47,17 +66,28 @@ class FakeLLM:
             must_haves=["Bachelor's degree"],
         )
 
-    def prefilter(self, criteria_summary, cv_text):
-        from app.schemas import PreFilterLLM
-        return PreFilterLLM(relevant="python" in cv_text.lower(), reason="kw")
+    def quick_score(self, criteria_summary, cv_text, db=None, tenant_id=1):
+        from app.schemas import QuickScoreLLM
+        relevant = "python" in cv_text.lower()
+        return QuickScoreLLM(
+            # 0 match for irrelevant CVs (no required skill) -> Tier 0 filter;
+            # otherwise low confidence -> escalate to deep_score.
+            match_pct=60.0 if relevant else 0.0,
+            confidence=0.4 if relevant else 0.9,
+            top_gaps=["React"],
+            summary="kw",
+        )
 
-    def deep_score(self, criteria_summary, cv_text):
+    def deep_score(self, criteria_summary, cv_text, db=None, tenant_id=1):
         from app.schemas import CandidateScoreLLM
         return CandidateScoreLLM(
             overall_score=8.0, job_match_pct=82.0,
             matched_keywords=["Python"], missing_keywords=["React"],
             reasoning="Strong backend match.",
         )
+
+    def embed(self, text, db=None, tenant_id=1):
+        return None
 
 
 def _use_fake_llm(client):
@@ -221,3 +251,23 @@ def test_analytics(client):
     assert data["total"] == 1
     assert data["scored"] == 1
     assert "stage_counts" in data
+    # Cascade telemetry present.
+    assert "tier_distribution" in data
+    assert sum(data["tier_distribution"].values()) == 1
+    assert "est_total_cost_usd" in data
+
+
+def test_usage_endpoint(client):
+    r = client.get("/usage")
+    assert r.status_code == 200
+    data = r.json()
+    assert "provider" in data
+    assert "today_cost_usd" in data
+    assert "by_tier" in data
+
+
+def test_health_reports_provider(client):
+    data = client.get("/health").json()
+    assert data["status"] == "ok"
+    assert "provider" in data
+    assert "today_cost_usd" in data

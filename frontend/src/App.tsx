@@ -1,45 +1,52 @@
-import { NavLink, Route, Routes, useParams } from "react-router-dom";
-import JobsList from "./pages/JobsList";
-import JobSetup from "./pages/JobSetup";
-import CandidatesDashboard from "./pages/CandidatesDashboard";
-import CandidateDetail from "./pages/CandidateDetail";
-import Analytics from "./pages/Analytics";
-
-// Per-job sub-nav lives in the sidebar when a job is selected.
-function JobNav() {
-  const { jobId } = useParams();
-  if (!jobId) return null;
-  return (
-    <nav style={{ marginTop: 20, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
-      <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>THIS JOB</div>
-      <NavLink to={`/jobs/${jobId}/setup`}>Setup &amp; criteria</NavLink>
-      <NavLink to={`/jobs/${jobId}/candidates`}>Candidates</NavLink>
-      <NavLink to={`/jobs/${jobId}/analytics`}>Analytics</NavLink>
-    </nav>
-  );
-}
+import { Route, Routes } from "react-router-dom";
+import { MarketingLayout } from "@/components/marketing-layout";
+import { AppLayout } from "@/components/app-layout";
+import { RequireAuth } from "@/components/require-auth";
+import Landing from "@/pages/Landing";
+import Pricing from "@/pages/Pricing";
+import Onboarding from "@/pages/Onboarding";
+import SignIn from "@/pages/SignIn";
+import SignUp from "@/pages/SignUp";
+import JobsList from "@/pages/JobsList";
+import JobSetup from "@/pages/JobSetup";
+import CandidatesDashboard from "@/pages/CandidatesDashboard";
+import CandidateDetail from "@/pages/CandidateDetail";
+import Analytics from "@/pages/Analytics";
+import Settings from "@/pages/Settings";
+import NotFound from "@/pages/NotFound";
 
 export default function App() {
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <h1>🛰️ OrbitTalent</h1>
-        <nav>
-          <NavLink to="/" end>Jobs</NavLink>
-        </nav>
-        <Routes>
-          <Route path="/jobs/:jobId/*" element={<JobNav />} />
-        </Routes>
-      </aside>
-      <main className="main">
-        <Routes>
-          <Route path="/" element={<JobsList />} />
-          <Route path="/jobs/:jobId/setup" element={<JobSetup />} />
-          <Route path="/jobs/:jobId/candidates" element={<CandidatesDashboard />} />
-          <Route path="/jobs/:jobId/candidates/:candidateId" element={<CandidateDetail />} />
-          <Route path="/jobs/:jobId/analytics" element={<Analytics />} />
-        </Routes>
-      </main>
-    </div>
+    <Routes>
+      {/* Public marketing */}
+      <Route element={<MarketingLayout />}>
+        <Route path="/" element={<Landing />} />
+        <Route path="/pricing" element={<Pricing />} />
+      </Route>
+
+      {/* Public auth */}
+      <Route path="/signin" element={<SignIn />} />
+      <Route path="/signup" element={<SignUp />} />
+
+      {/* Authenticated routes */}
+      <Route element={<RequireAuth />}>
+        {/* Standalone onboarding wizard (own chrome) */}
+        <Route path="/onboarding" element={<Onboarding />} />
+
+        <Route path="/app" element={<AppLayout />}>
+          <Route index element={<JobsList />} />
+          <Route path="settings" element={<Settings />} />
+          <Route path="jobs/:jobId/setup" element={<JobSetup />} />
+          <Route path="jobs/:jobId/candidates" element={<CandidatesDashboard />} />
+          <Route
+            path="jobs/:jobId/candidates/:candidateId"
+            element={<CandidateDetail />}
+          />
+          <Route path="jobs/:jobId/analytics" element={<Analytics />} />
+        </Route>
+      </Route>
+
+      <Route path="*" element={<NotFound />} />
+    </Routes>
   );
 }
