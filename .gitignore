@@ -5,10 +5,6 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# Tests (not published)
-pytest.ini
-backend/tests/
-
 # Secrets
 .env
 
