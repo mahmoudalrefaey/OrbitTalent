@@ -268,42 +268,6 @@ cookie). Registration and login are public.
 The full, interactive schema is available at `/docs` when the backend is
 running.
 
-## Deployment Instructions
-
-OrbitTalent targets PostgreSQL in production.
-
-1. Provision a PostgreSQL database and set `DATABASE_URL`:
-
-   ```bash
-   export DATABASE_URL="postgresql+psycopg://user:password@host:5432/orbittalent"
-   ```
-
-2. Set a real `JWT_SECRET` and `COOKIE_SECURE=true` (assuming HTTPS).
-
-3. Create the schema:
-
-   ```bash
-   cd backend
-   alembic upgrade head
-   ```
-
-4. Serve the API with a production server, for example:
-
-   ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port 8000
-   ```
-
-5. Build the frontend and serve the static output behind a web server or CDN,
-   proxying `/api` to the backend:
-
-   ```bash
-   cd frontend
-   npm run build      # output in frontend/dist
-   ```
-
-The database engine uses connection pooling with liveness checks
-(`pool_pre_ping`).
-
 ## Configuration Options
 
 - **LLM provider** — point `LLM_BASE_URL` at any OpenAI-compatible endpoint and
