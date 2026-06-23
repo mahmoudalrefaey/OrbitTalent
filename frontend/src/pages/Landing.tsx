@@ -123,19 +123,19 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* Social proof */}
+      {/* Capability strip */}
       <section className="border-y border-border bg-card/40">
         <div className="container py-10">
-          <p className="text-center text-sm font-medium uppercase tracking-widest text-muted-foreground">
-            Trusted by recruiting teams at fast-moving companies
-          </p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-x-10 gap-y-4 text-lg font-semibold text-muted-foreground/70">
-            <span>Nebula</span>
-            <span>Apex Hire</span>
-            <span>Lumen Labs</span>
-            <span>Northwind</span>
-            <span>Quanta</span>
-            <span>Vertex</span>
+          <div className="flex flex-wrap items-center justify-center gap-x-10 gap-y-3 text-sm font-medium text-muted-foreground">
+            <span>Explainable scoring</span>
+            <span className="text-border">·</span>
+            <span>Cost-optimized AI</span>
+            <span className="text-border">·</span>
+            <span>PDF, DOCX &amp; TXT</span>
+            <span className="text-border">·</span>
+            <span>Per-tenant isolation</span>
+            <span className="text-border">·</span>
+            <span>Funnel &amp; skill-gap analytics</span>
           </div>
         </div>
       </section>
@@ -225,7 +225,7 @@ export default function Landing() {
           </h2>
           <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
             Spin up your first job, extract criteria with AI, and upload a batch of
-            CVs in minutes. No credit card required.
+            CVs in minutes.
           </p>
           <div className="mt-8 flex justify-center">
             <Link to="/onboarding" className={cn(buttonVariants({ size: "lg" }))}>

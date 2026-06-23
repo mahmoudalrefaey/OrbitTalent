@@ -3,23 +3,24 @@
 Each candidate exits at the cheapest tier that yields a confident answer:
 
   Tier 0  deterministic   parse + ATS + keyword coverage         (free)
-  Tier 1  embedding gate   cosine(JD, CV) similarity              (cheap, optional)
+  Tier 1  similarity gate  BM25(JD, CV) + skill overlap           (free)
   Tier 2  cheap LLM        one combined prefilter+score call      (cheap)
   Tier 3  deep LLM         precise overall score                  (expensive)
 
 Most CVs resolve at Tier 0-2; the expensive model runs only on borderline or
 strong candidates. The criteria block is prompt-cached so a whole batch is
 billed for it once. This module is pure orchestration logic over an
-`LLMService`; persistence lives in `pipeline.py`.
+`LLMService` + the deterministic `similarity` engine; persistence lives in
+`pipeline.py`.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 from app.config import get_settings
 from app.models import DEFAULT_TENANT_ID, ScoreStatus
 from app.services import llm as llm_mod
+from app.services import similarity
 
 settings = get_settings()
 
@@ -35,15 +36,8 @@ class CascadeResult:
     reasoning: str = ""
     matched_keywords: list[str] = field(default_factory=list)
     missing_keywords: list[str] = field(default_factory=list)
-
-
-def cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    return dot / (na * nb) if na and nb else 0.0
+    # Profile fields extracted by the Tier-3 deep score (empty otherwise).
+    enrichment: dict = field(default_factory=dict)
 
 
 def required_coverage(matched: list[str], required: list[str]) -> float:
@@ -61,10 +55,11 @@ def run_cascade(
     *,
     criteria_summary: str,
     required_skills: list[str],
+    preferred_skills: list[str],
+    jd_text: str,
     cv_text: str,
     matched_keywords: list[str],
     missing_keywords: list[str],
-    job_embedding: list[float] | None,
     db,
     tenant_id: int = DEFAULT_TENANT_ID,
 ) -> CascadeResult:
@@ -86,24 +81,27 @@ def run_cascade(
             missing_keywords=missing_keywords,
         )
 
-    # ---- Tier 1: optional embedding similarity gate ---------------------
-    if job_embedding is not None:
-        cv_vec = service.embed(cv_text, db=db, tenant_id=tenant_id)
-        if cv_vec is not None:
-            sim = cosine(job_embedding, cv_vec)
-            if sim < settings.tier1_min_similarity:
-                return CascadeResult(
-                    status=ScoreStatus.filtered_out,
-                    tier_reached=1,
-                    overall_score=1.0,
-                    job_match_pct=round(sim * 100, 1),
-                    reasoning=(
-                        f"Filtered at Tier 1: low semantic similarity to the "
-                        f"role ({sim:.2f})."
-                    ),
-                    matched_keywords=matched_keywords,
-                    missing_keywords=missing_keywords,
-                )
+    # ---- Tier 1: deterministic BM25 + skill similarity gate -------------
+    # (Replaces the old embedding gate — g0i.ai has no embedding models.)
+    # similarity is 0..100; below the threshold (×100) we reject before any
+    # LLM spend. Skipped when there's no JD text to compare against.
+    if jd_text.strip():
+        sim = similarity.job_similarity(
+            cv_text, jd_text, required_skills, preferred_skills
+        )
+        if sim < settings.tier1_min_similarity * 100:
+            return CascadeResult(
+                status=ScoreStatus.filtered_out,
+                tier_reached=1,
+                overall_score=1.0,
+                job_match_pct=sim,
+                reasoning=(
+                    f"Filtered at Tier 1: low lexical similarity to the role "
+                    f"({sim:.0f}/100, BM25 + skill overlap)."
+                ),
+                matched_keywords=matched_keywords,
+                missing_keywords=missing_keywords,
+            )
 
     # ---- Tier 2: cheap combined prefilter + score -----------------------
     quick = service.quick_score(criteria_summary, cv_text, db=db, tenant_id=tenant_id)
@@ -129,6 +127,20 @@ def run_cascade(
     deep = service.deep_score(criteria_summary, cv_text, db=db, tenant_id=tenant_id)
     matched = sorted(set(matched_keywords) | set(deep.matched_keywords))
     missing = deep.missing_keywords or merged_missing
+    # Profile enrichment extracted in the same call (null fields omitted).
+    enrichment = {
+        k: v
+        for k, v in {
+            "country": deep.country,
+            "city": deep.city,
+            "experience_years": deep.experience_years,
+            "education": deep.education,
+            "certifications": deep.certifications,
+            "languages": deep.languages,
+            "expected_salary": deep.expected_salary,
+        }.items()
+        if v not in (None, [], "")
+    }
     return CascadeResult(
         status=ScoreStatus.scored,
         tier_reached=3,
@@ -137,4 +149,5 @@ def run_cascade(
         reasoning=deep.reasoning,
         matched_keywords=matched,
         missing_keywords=missing,
+        enrichment=enrichment,
     )

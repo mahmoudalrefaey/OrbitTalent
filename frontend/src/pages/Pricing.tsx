@@ -1,4 +1,3 @@
-import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Check } from "lucide-react";
 import {
@@ -27,10 +26,10 @@ interface Tier {
   description: string;
   features: string[];
   cta: string;
-  to?: string;
-  highlight?: boolean;
 }
 
+// Planned tiers — shown as a preview only. Pricing is not live yet, so none of
+// these have working CTAs.
 const tiers: Tier[] = [
   {
     name: "Starter",
@@ -38,44 +37,33 @@ const tiers: Tier[] = [
     description: "For trying it out and small one-off hiring rounds.",
     features: [
       "1 active job",
-      "Up to 50 CVs / month",
       "Cascade scoring (cheap tiers)",
       "ATS + job-match scores",
-      "Community support",
     ],
-    cta: "Get started",
-    to: "/onboarding",
+    cta: "Coming soon",
   },
   {
     name: "Pro",
-    price: "$49",
-    period: "/mo",
+    price: "—",
     description: "For recruiters screening at volume every week.",
     features: [
       "Unlimited jobs",
-      "Up to 2,000 CVs / month",
       "Full deep-model cascade",
       "Explainable reasoning & keywords",
       "Per-job cost dashboard",
-      "Priority email support",
     ],
-    cta: "Start free trial",
-    to: "/onboarding",
-    highlight: true,
+    cta: "Coming soon",
   },
   {
     name: "Enterprise",
-    price: "Custom",
+    price: "—",
     description: "For teams with high volume, SSO and compliance needs.",
     features: [
       "Everything in Pro",
-      "Unlimited CVs",
       "SSO & role-based access",
       "Custom data retention",
-      "Dedicated success manager",
-      "SLA & onboarding",
     ],
-    cta: "Contact sales",
+    cta: "Coming soon",
   },
 ];
 
@@ -93,8 +81,8 @@ const faqs = [
     a: "Yes. After the AI proposes required skills, preferred skills and must-haves, you can edit everything before scoring begins.",
   },
   {
-    q: "Is pricing final?",
-    a: "Pricing shown here is illustrative for this demo. Reach out to sales for a quote tailored to your hiring volume.",
+    q: "Is pricing available yet?",
+    a: "Not yet. OrbitTalent is an early demo, so the tiers below are a preview of the planned structure rather than something you can buy today.",
   },
 ];
 
@@ -102,14 +90,15 @@ export default function Pricing() {
   return (
     <div className="container py-20 sm:py-28">
       <motion.div {...fadeUp} className="mx-auto max-w-2xl text-center">
+        <Badge variant="secondary" className="mb-4">
+          Coming soon
+        </Badge>
         <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">
-          Simple, transparent pricing
+          Pricing is on the way
         </h1>
         <p className="mt-4 text-lg text-muted-foreground">
-          Pay for depth only when it matters. Start free and scale as you hire.
-        </p>
-        <p className="mt-2 text-sm text-muted-foreground/70">
-          Pricing below is illustrative.
+          OrbitTalent is an early demo. Here is a preview of the planned plans —
+          nothing is for sale yet, and the whole app is free to try.
         </p>
       </motion.div>
 
@@ -123,17 +112,7 @@ export default function Pricing() {
             transition={{ duration: 0.5, delay: i * 0.07 }}
             whileHover={{ y: -4 }}
           >
-            <Card
-              className={cn(
-                "relative flex h-full flex-col",
-                tier.highlight && "ring-2 ring-primary shadow-lg shadow-primary/10"
-              )}
-            >
-              {tier.highlight && (
-                <Badge className="absolute -top-3 left-1/2 -translate-x-1/2">
-                  Most popular
-                </Badge>
-              )}
+            <Card className="flex h-full flex-col">
               <CardHeader>
                 <CardTitle className="text-xl">{tier.name}</CardTitle>
                 <CardDescription>{tier.description}</CardDescription>
@@ -157,26 +136,16 @@ export default function Pricing() {
                 </ul>
               </CardContent>
               <CardFooter>
-                {tier.to ? (
-                  <Link
-                    to={tier.to}
-                    className={cn(
-                      buttonVariants({
-                        variant: tier.highlight ? "default" : "outline",
-                      }),
-                      "w-full"
-                    )}
-                  >
-                    {tier.cta}
-                  </Link>
-                ) : (
-                  <Link
-                    to="/onboarding"
-                    className={cn(buttonVariants({ variant: "outline" }), "w-full")}
-                  >
-                    {tier.cta}
-                  </Link>
-                )}
+                <button
+                  type="button"
+                  disabled
+                  className={cn(
+                    buttonVariants({ variant: "outline" }),
+                    "w-full cursor-not-allowed opacity-60"
+                  )}
+                >
+                  {tier.cta}
+                </button>
               </CardFooter>
             </Card>
           </motion.div>

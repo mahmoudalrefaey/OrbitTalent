@@ -17,15 +17,21 @@ from app.db import SessionLocal, get_db
 from app.deps import CurrentUser
 from app.models import (
     Candidate,
+    CandidateStage,
     Job,
+    RejectionReason,
     ScoreStatus,
+    StageEvent,
 )
 from app.schemas import (
+    BulkAction,
     CandidateDetailOut,
     CandidateOut,
+    CandidatePatch,
+    StageEventOut,
     StageUpdate,
 )
-from app.services import llm
+from app.services import candidate_service, llm
 from app.services.pipeline import process_candidate
 
 router = APIRouter(tags=["candidates"])
@@ -45,11 +51,7 @@ def _owned_candidate(db: Session, candidate_id: int, tenant_id: int) -> Candidat
     return cand
 
 
-def _run_pipeline_bg(
-    candidate_id: int,
-    file_bytes: bytes,
-    job_embedding: list[float] | None = None,
-) -> None:
+def _run_pipeline_bg(candidate_id: int, file_bytes: bytes) -> None:
     """Background task entry — opens its own DB session and LLM service."""
     service: llm.LLMService | None
     try:
@@ -58,7 +60,7 @@ def _run_pipeline_bg(
         service = None
 
     with SessionLocal() as db:
-        process_candidate(db, candidate_id, file_bytes, service, job_embedding)
+        process_candidate(db, candidate_id, file_bytes, service)
 
 
 @router.post(
@@ -77,11 +79,6 @@ async def upload_candidates(
     if not files:
         raise HTTPException(400, "No files uploaded")
 
-    # Precompute the job-criteria embedding ONCE per batch (Tier-1 gate). Cheap
-    # and shared across every CV in the upload. Skips silently if embeddings
-    # are disabled/unsupported.
-    job_embedding = _job_embedding(db, job)
-
     created: list[Candidate] = []
     for upload in files:
         data = await upload.read()
@@ -94,49 +91,28 @@ async def upload_candidates(
         db.add(candidate)
         db.commit()
         db.refresh(candidate)
+        candidate_service.record_initial_stage(db, candidate)
         # Capture bytes by value so the task isn't tied to the request lifecycle.
-        background.add_task(_run_pipeline_bg, candidate.id, data, job_embedding)
+        background.add_task(_run_pipeline_bg, candidate.id, data)
         created.append(candidate)
 
     return [CandidateOut.model_validate(c) for c in created]
 
 
-def _job_embedding(db: Session, job: Job) -> list[float] | None:
-    """Embed the job criteria once for the Tier-1 similarity gate.
-
-    Returns None when embeddings are disabled, unsupported, or no LLM key is
-    configured — the cascade then skips Tier 1 entirely.
-    """
-    crit = job.criteria
-    if crit is None:
-        return None
-    try:
-        service = llm.get_llm_service()
-    except llm.LLMUnavailableError:
-        return None
-    embed = getattr(service, "embed", None)
-    if embed is None:
-        return None
-    summary = llm.criteria_summary(
-        crit.required_skills,
-        crit.preferred_skills,
-        crit.min_years,
-        crit.must_haves,
-        crit.weights,
-    )
-    return embed(summary, db=db, tenant_id=job.tenant_id)
-
-
 @router.get("/jobs/{job_id}/candidates", response_model=list[CandidateOut])
 def list_candidates(
-    job_id: int, user: CurrentUser, db: Session = Depends(get_db)
+    job_id: int,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+    stage: CandidateStage | None = None,
 ) -> list[CandidateOut]:
     _owned_job(db, job_id, user.tenant_id)
+    q = select(Candidate).where(Candidate.job_id == job_id)
+    if stage is not None:
+        q = q.where(Candidate.stage == stage)
     rows = db.scalars(
-        select(Candidate)
-        .where(Candidate.job_id == job_id)
-        # Highest overall score first; nulls (still processing) last.
-        .order_by(
+        q.order_by(
+            # Highest overall score first; nulls (still processing) last.
             Candidate.overall_score.is_(None).asc(),
             Candidate.overall_score.desc(),
             Candidate.job_match_pct.desc().nullslast(),
@@ -162,7 +138,111 @@ def update_stage(
     db: Session = Depends(get_db),
 ) -> CandidateOut:
     candidate = _owned_candidate(db, candidate_id, user.tenant_id)
-    candidate.stage = payload.stage
+    candidate_service.change_stage(
+        db,
+        candidate,
+        payload.stage,
+        by_user_id=user.id,
+        reason=payload.reason,
+        rejection_reason=payload.rejection_reason,
+    )
+    return CandidateOut.model_validate(candidate)
+
+
+@router.patch("/candidates/{candidate_id}", response_model=CandidateOut)
+def patch_candidate(
+    candidate_id: int,
+    payload: CandidatePatch,
+    user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> CandidateOut:
+    """Edit candidate fields (profile, assignment, and/or stage). Stage changes
+    go through the history-recording helper."""
+    candidate = _owned_candidate(db, candidate_id, user.tenant_id)
+    data = payload.model_dump(exclude_unset=True)
+
+    # Stage (if present) is handled via the helper so it logs a StageEvent.
+    new_stage = data.pop("stage", None)
+    rejection = data.pop("rejection_reason", None)
+
+    # Validate recruiter assignment stays within the tenant.
+    if "assigned_recruiter_id" in data and data["assigned_recruiter_id"] is not None:
+        from app.models import User
+
+        rec = db.get(User, data["assigned_recruiter_id"])
+        if rec is None or rec.tenant_id != user.tenant_id:
+            raise HTTPException(400, "Invalid recruiter")
+
+    for k, v in data.items():
+        setattr(candidate, k, v)
+
+    if new_stage is not None:
+        candidate_service.change_stage(
+            db, candidate, new_stage, by_user_id=user.id,
+            rejection_reason=rejection, commit=False,
+        )
+    elif rejection is not None:
+        candidate.rejection_reason = rejection
+
     db.commit()
     db.refresh(candidate)
     return CandidateOut.model_validate(candidate)
+
+
+@router.get("/candidates/{candidate_id}/history", response_model=list[StageEventOut])
+def candidate_history(
+    candidate_id: int, user: CurrentUser, db: Session = Depends(get_db)
+) -> list[StageEventOut]:
+    candidate = _owned_candidate(db, candidate_id, user.tenant_id)
+    events = db.scalars(
+        select(StageEvent)
+        .where(StageEvent.candidate_id == candidate.id)
+        .order_by(StageEvent.at)
+    ).all()
+    return [StageEventOut.model_validate(e) for e in events]
+
+
+@router.post("/candidates/bulk")
+def bulk_action(
+    payload: BulkAction, user: CurrentUser, db: Session = Depends(get_db)
+) -> dict:
+    """Apply one action to many candidates (all tenant-checked).
+
+    Actions: move_stage (needs `stage`), reject (needs `rejection_reason`),
+    shortlist, export (returns the candidates as rows for client-side CSV).
+    """
+    rows = db.scalars(
+        select(Candidate).where(
+            Candidate.id.in_(payload.candidate_ids),
+            Candidate.tenant_id == user.tenant_id,
+        )
+    ).all()
+    found_ids = {c.id for c in rows}
+    missing = [i for i in payload.candidate_ids if i not in found_ids]
+
+    if payload.action == "export":
+        return {
+            "action": "export",
+            "candidates": [CandidateOut.model_validate(c).model_dump() for c in rows],
+            "skipped": missing,
+        }
+
+    if payload.action == "move_stage":
+        if payload.stage is None:
+            raise HTTPException(400, "move_stage requires `stage`")
+        target, rej = payload.stage, None
+    elif payload.action == "shortlist":
+        target, rej = CandidateStage.shortlisted, None
+    elif payload.action == "reject":
+        target = CandidateStage.rejected
+        rej = payload.rejection_reason or RejectionReason.recruiter_decision
+    else:
+        raise HTTPException(400, f"Unknown action: {payload.action}")
+
+    for c in rows:
+        candidate_service.change_stage(
+            db, c, target, by_user_id=user.id,
+            reason=payload.reason, rejection_reason=rej, commit=False,
+        )
+    db.commit()
+    return {"action": payload.action, "updated": len(rows), "skipped": missing}

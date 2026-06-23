@@ -33,10 +33,47 @@ class JobStatus(str, enum.Enum):
 
 
 class CandidateStage(str, enum.Enum):
+    # Full ATS lifecycle (V2). Order matters for funnel/conversion analytics.
     new = "new"
+    ai_screened = "ai_screened"
+    qualified = "qualified"
     shortlisted = "shortlisted"
-    interview = "interview"
+    assessment_pending = "assessment_pending"
+    assessment_passed = "assessment_passed"
+    interview_scheduled = "interview_scheduled"
+    interview_passed = "interview_passed"
+    final_review = "final_review"
+    offer_sent = "offer_sent"
+    hired = "hired"
     rejected = "rejected"
+    withdrawn = "withdrawn"
+
+
+# Ordered funnel of the "happy path" stages (excludes terminal rejected/withdrawn)
+# — used by analytics for funnel counts + stage→stage conversion rates.
+STAGE_FUNNEL_ORDER: list[CandidateStage] = [
+    CandidateStage.new,
+    CandidateStage.ai_screened,
+    CandidateStage.qualified,
+    CandidateStage.shortlisted,
+    CandidateStage.assessment_pending,
+    CandidateStage.assessment_passed,
+    CandidateStage.interview_scheduled,
+    CandidateStage.interview_passed,
+    CandidateStage.final_review,
+    CandidateStage.offer_sent,
+    CandidateStage.hired,
+]
+
+
+class RejectionReason(str, enum.Enum):
+    low_ai_score = "low_ai_score"
+    missing_required_skills = "missing_required_skills"
+    wrong_experience_level = "wrong_experience_level"
+    wrong_location = "wrong_location"
+    country_restriction = "country_restriction"
+    duplicate_application = "duplicate_application"
+    recruiter_decision = "recruiter_decision"
 
 
 class ScoreStatus(str, enum.Enum):
@@ -116,6 +153,16 @@ class ScoringCriteria(Base):
     # Relative importance, e.g. {"required_skills": 0.5, "preferred_skills": 0.2, ...}
     weights: Mapped[dict] = mapped_column(JSON, default=dict)
 
+    # --- Hiring rules (V2) — feed scoring + automation. All optional. ---
+    geo_allow: Mapped[list[str]] = mapped_column(JSON, default=list)   # allowed countries
+    geo_block: Mapped[list[str]] = mapped_column(JSON, default=list)   # auto-reject countries
+    min_degree: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    preferred_universities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    min_experience: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_experience: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # AI ranking importance, e.g. {"skills": 0.4, "experience": 0.2, "education": 0.15, ...}
+    ranking_weights: Mapped[dict] = mapped_column(JSON, default=dict)
+
     job: Mapped[Job] = relationship(back_populates="criteria")
 
 
@@ -144,21 +191,103 @@ class Candidate(Base):
 
     # Cascade efficiency telemetry.
     # tier_reached: highest cascade tier this CV consumed (0=deterministic,
-    # 1=embedding gate, 2=cheap LLM, 3=deep LLM). Backs analytics cost metrics.
+    # 1=similarity gate, 2=cheap LLM, 3=deep LLM). Backs analytics cost metrics.
     tier_reached: Mapped[int] = mapped_column(Integer, default=0)
     cache_hit: Mapped[bool] = mapped_column(Boolean, default=False)
     est_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
 
+    # --- ATS profile fields (V2) — LLM-extracted at scoring time or edited. ---
+    country: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    experience_years: Mapped[float | None] = mapped_column(Float, nullable=True)
+    education: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    certifications: Mapped[list[str]] = mapped_column(JSON, default=list)
+    languages: Mapped[list[str]] = mapped_column(JSON, default=list)
+    expected_salary: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     stage: Mapped[CandidateStage] = mapped_column(
         Enum(CandidateStage), default=CandidateStage.new
+    )
+    # Set only when stage == rejected.
+    rejection_reason: Mapped[RejectionReason | None] = mapped_column(
+        Enum(RejectionReason), nullable=True
+    )
+    # Recruiter this candidate is assigned to (FK users, null = unassigned).
+    assigned_recruiter_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
     )
     score_status: Mapped[ScoreStatus] = mapped_column(
         Enum(ScoreStatus), default=ScoreStatus.pending
     )
     error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    # Distinct from created_at so imported/backdated applications keep their date.
+    applied_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     job: Mapped[Job] = relationship(back_populates="candidates")
+    stage_events: Mapped[list[StageEvent]] = relationship(
+        back_populates="candidate",
+        cascade="all, delete-orphan",
+        order_by="StageEvent.at",
+    )
+
+
+class StageEvent(Base):
+    """Append-only history of candidate stage transitions.
+
+    Powers funnel counts, stage→stage conversion rates, time-in-stage, and
+    recruiter response-time metrics. Written on every stage change (manual,
+    bulk, or automation). `from_stage` is null for the initial 'new' event.
+    """
+
+    __tablename__ = "stage_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(
+        ForeignKey("tenants.id"), index=True
+    )
+    candidate_id: Mapped[int] = mapped_column(
+        ForeignKey("candidates.id"), index=True
+    )
+    from_stage: Mapped[CandidateStage | None] = mapped_column(
+        Enum(CandidateStage), nullable=True
+    )
+    to_stage: Mapped[CandidateStage] = mapped_column(Enum(CandidateStage))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    # Null = system/automation; else the user who made the change.
+    by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+    at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+    candidate: Mapped[Candidate] = relationship(back_populates="stage_events")
+
+
+class AutomationRule(Base):
+    """Recruiter-configured auto-reject / auto-progress / auto-assign rule.
+
+    Conditions + action are stored as JSON so the rule vocabulary can grow
+    without migrations. Evaluated by app.services.automation.
+    """
+
+    __tablename__ = "automation_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(
+        ForeignKey("tenants.id"), index=True
+    )
+    # Null = applies to all jobs in the tenant; else scoped to one job.
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("jobs.id"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), default="")
+    # e.g. [{"field": "overall_score", "op": "lt", "value": 6}, ...]
+    trigger_json: Mapped[list] = mapped_column(JSON, default=list)
+    # e.g. {"type": "reject", "reason": "low_ai_score"} or {"type": "move", "stage": "shortlisted"}
+    action_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class UsageRecord(Base):

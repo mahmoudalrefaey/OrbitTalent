@@ -99,18 +99,11 @@ def upgrade() -> None:
 
     # ### end Alembic commands ###
 
-    # Seed the default tenant (matches app.db.init_db) so a fresh DB created
-    # purely via `alembic upgrade head` is immediately usable.
-    tenants = sa.table(
-        "tenants",
-        sa.column("id", sa.Integer),
-        sa.column("name", sa.String),
-        sa.column("created_at", sa.DateTime),
-    )
-    op.bulk_insert(
-        tenants,
-        [{"id": 1, "name": "Default", "created_at": __import__("datetime").datetime.utcnow()}],
-    )
+    # NOTE: intentionally NO default-tenant seed. With per-user tenants (each
+    # signup creates its own tenant), seeding an explicit id=1 row left the
+    # Postgres SERIAL sequence pointing at 1, so the first real registration
+    # collided on tenants_pkey. A fresh DB must start with an empty tenants
+    # table so the sequence and the first INSERT agree.
 
 
 def downgrade() -> None:

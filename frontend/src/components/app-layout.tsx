@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
-import { Link, NavLink, Outlet, useParams } from "react-router-dom";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  BarChart3,
   Briefcase,
+  LayoutDashboard,
   Menu,
   Rocket,
+  Search,
   Settings,
-  Users,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -23,29 +23,6 @@ const navItemCls = ({ isActive }: { isActive: boolean }) =>
       : "text-muted-foreground hover:bg-secondary hover:text-foreground"
   );
 
-function JobNav() {
-  const { jobId } = useParams();
-  if (!jobId) return null;
-  return (
-    <div className="mt-6 border-t border-border pt-4">
-      <div className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-        This job
-      </div>
-      <nav className="flex flex-col gap-1">
-        <NavLink to={`/app/jobs/${jobId}/setup`} className={navItemCls}>
-          <Briefcase className="h-4 w-4" /> Setup &amp; criteria
-        </NavLink>
-        <NavLink to={`/app/jobs/${jobId}/candidates`} className={navItemCls}>
-          <Users className="h-4 w-4" /> Candidates
-        </NavLink>
-        <NavLink to={`/app/jobs/${jobId}/analytics`} className={navItemCls}>
-          <BarChart3 className="h-4 w-4" /> Analytics
-        </NavLink>
-      </nav>
-    </div>
-  );
-}
-
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <div className="flex h-full flex-col p-4" onClick={onNavigate}>
@@ -54,13 +31,18 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       </Link>
       <nav className="flex flex-col gap-1">
         <NavLink to="/app" end className={navItemCls}>
+          <LayoutDashboard className="h-4 w-4" /> Dashboard
+        </NavLink>
+        <NavLink to="/app/jobs" className={navItemCls}>
           <Briefcase className="h-4 w-4" /> Jobs
+        </NavLink>
+        <NavLink to="/app/search" className={navItemCls}>
+          <Search className="h-4 w-4" /> Search
         </NavLink>
         <NavLink to="/app/settings" className={navItemCls}>
           <Settings className="h-4 w-4" /> Settings
         </NavLink>
       </nav>
-      <JobNav />
       <div className="mt-auto px-2 pt-4">
         <Link
           to="/onboarding"

@@ -1,7 +1,58 @@
-import type { CandidateStage, ScoreStatus } from "@/api/client";
+import type { CandidateStage, RejectionReason, ScoreStatus } from "@/api/client";
+import { CANDIDATE_STAGES } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/misc";
 import { cn } from "@/lib/utils";
+
+/** Human labels for the 13 ATS stages. */
+export const STAGE_LABELS: Record<CandidateStage, string> = {
+  new: "New",
+  ai_screened: "AI Screened",
+  qualified: "Qualified",
+  shortlisted: "Shortlisted",
+  assessment_pending: "Assessment Pending",
+  assessment_passed: "Assessment Passed",
+  interview_scheduled: "Interview Scheduled",
+  interview_passed: "Interview Passed",
+  final_review: "Final Review",
+  offer_sent: "Offer Sent",
+  hired: "Hired",
+  rejected: "Rejected",
+  withdrawn: "Withdrawn",
+};
+
+export const REJECTION_LABELS: Record<RejectionReason, string> = {
+  low_ai_score: "Low AI score",
+  missing_required_skills: "Missing required skills",
+  wrong_experience_level: "Wrong experience level",
+  wrong_location: "Wrong location",
+  country_restriction: "Country restriction",
+  duplicate_application: "Duplicate application",
+  recruiter_decision: "Recruiter decision",
+};
+
+type BadgeVariant =
+  | "default" | "secondary" | "success" | "warning" | "danger" | "outline";
+
+const STAGE_VARIANT: Record<CandidateStage, BadgeVariant> = {
+  new: "secondary",
+  ai_screened: "secondary",
+  qualified: "default",
+  shortlisted: "default",
+  assessment_pending: "warning",
+  assessment_passed: "default",
+  interview_scheduled: "warning",
+  interview_passed: "default",
+  final_review: "warning",
+  offer_sent: "success",
+  hired: "success",
+  rejected: "danger",
+  withdrawn: "outline",
+};
+
+export function StageBadge({ stage }: { stage: CandidateStage }) {
+  return <Badge variant={STAGE_VARIANT[stage]}>{STAGE_LABELS[stage]}</Badge>;
+}
 
 export function ScoreBadge({ score }: { score: number | null }) {
   if (score == null) return <span className="text-muted-foreground">—</span>;
@@ -43,8 +94,6 @@ export function KeywordChips({ items, kind }: { items: string[]; kind: "good" | 
   );
 }
 
-const STAGES: CandidateStage[] = ["new", "shortlisted", "interview", "rejected"];
-
 export function StageSelect({
   value,
   onChange,
@@ -57,11 +106,11 @@ export function StageSelect({
       value={value}
       onClick={(e) => e.stopPropagation()}
       onChange={(e) => onChange(e.target.value as CandidateStage)}
-      className="h-9 rounded-md border border-input bg-background px-2 text-sm capitalize focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="h-9 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
-      {STAGES.map((s) => (
-        <option key={s} value={s} className="capitalize">
-          {s}
+      {CANDIDATE_STAGES.map((s) => (
+        <option key={s} value={s}>
+          {STAGE_LABELS[s]}
         </option>
       ))}
     </select>

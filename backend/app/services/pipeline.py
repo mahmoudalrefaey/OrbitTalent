@@ -19,8 +19,15 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Candidate, Job, ScoreStatus, UsageRecord
-from app.services import cascade, keyword_matcher, llm
+from app.models import (
+    Candidate,
+    CandidateStage,
+    Job,
+    RejectionReason,
+    ScoreStatus,
+    UsageRecord,
+)
+from app.services import automation, candidate_service, cascade, keyword_matcher, llm
 from app.services.ats_scorer import score_ats
 from app.services.cv_parser import parse_cv
 
@@ -36,25 +43,16 @@ def _all_keywords(job: Job) -> list[str]:
     return list(seen)
 
 
-def _cost_since(db: Session, started_at: datetime) -> float:
-    """Sum usage cost recorded since `started_at` (this candidate's spend)."""
-    rows = db.scalars(
-        select(UsageRecord).where(UsageRecord.created_at >= started_at)
-    ).all()
-    return round(sum(r.cost_usd for r in rows), 6)
-
-
 def process_candidate(
     db: Session,
     candidate_id: int,
     file_bytes: bytes,
     llm_service: llm.LLMService | None,
-    job_embedding: list[float] | None = None,
 ) -> None:
     """Run the full pipeline for one candidate and persist results.
 
     Safe to call in a background task: records failures on the row rather than
-    raising. `job_embedding` may be precomputed once per batch and passed in.
+    raising. Tier-1 similarity (BM25 + skills) is computed inside the cascade.
     """
     candidate = db.get(Candidate, candidate_id)
     if candidate is None:
@@ -112,10 +110,11 @@ def process_candidate(
             llm_service,
             criteria_summary=summary,
             required_skills=crit.required_skills if crit else [],
+            preferred_skills=crit.preferred_skills if crit else [],
+            jd_text=job.jd_text or "",
             cv_text=parsed.text,
             matched_keywords=km.matched,
             missing_keywords=km.missing,
-            job_embedding=job_embedding,
             db=db,
             tenant_id=candidate.tenant_id,
         )
@@ -128,12 +127,41 @@ def process_candidate(
         candidate.matched_keywords = result.matched_keywords
         candidate.missing_keywords = result.missing_keywords
 
+        # Persist profile enrichment from the deep score (only fields the model
+        # actually returned — never overwrite an existing value with null).
+        for fieldname, value in (result.enrichment or {}).items():
+            if value not in (None, [], "") and hasattr(candidate, fieldname):
+                setattr(candidate, fieldname, value)
+
         # 5. Cost + cache telemetry for this candidate.
         rows = db.scalars(
             select(UsageRecord).where(UsageRecord.created_at >= started_at)
         ).all()
         candidate.est_cost_usd = round(sum(r.cost_usd for r in rows), 6)
         candidate.cache_hit = any(r.cached_tokens > 0 for r in rows)
+        db.flush()
+
+        # 6. Auto-reject filtered-out candidates: a cascade filter (Tier 0/1/2)
+        #    means the candidate didn't clear screening, so move them to the
+        #    `rejected` stage with a reason (recorded in stage history). Tier 0/1
+        #    = missing skills / poor fit; Tier 2 = low AI score.
+        if result.status == ScoreStatus.filtered_out:
+            reason = (
+                RejectionReason.missing_required_skills
+                if result.tier_reached in (0, 1)
+                else RejectionReason.low_ai_score
+            )
+            candidate_service.change_stage(
+                db, candidate, CandidateStage.rejected,
+                reason=f"auto-filtered at Tier {result.tier_reached}",
+                rejection_reason=reason, commit=False,
+            )
+
+        # 7. Automation rules — run on EVERY candidate that finished scoring
+        #    (scored or filtered_out), so custom rules (e.g. reject if
+        #    overall_score < 60) fire regardless of which tier they exited at.
+        if candidate.score_status in (ScoreStatus.scored, ScoreStatus.filtered_out):
+            automation.apply_rules(db, candidate)
         db.commit()
 
     except Exception as exc:  # noqa: BLE001 — one bad CV must not sink the batch

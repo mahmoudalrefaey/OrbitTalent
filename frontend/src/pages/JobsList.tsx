@@ -4,9 +4,11 @@ import { motion } from "framer-motion";
 import {
   AlertTriangle,
   Briefcase,
+  Loader2,
   Plus,
   Rocket,
   Sparkles,
+  Trash2,
   Users,
 } from "lucide-react";
 import { api, type Job } from "@/api/client";
@@ -36,6 +38,8 @@ export default function JobsList() {
   const [llmEnabled, setLlmEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [confirmId, setConfirmId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
   const nav = useNavigate();
 
   async function load() {
@@ -59,10 +63,24 @@ export default function JobsList() {
     setCreating(true);
     try {
       const job = await api.createJob(title, jd);
-      nav(`/app/jobs/${job.id}/setup`);
+      nav(`/app/jobs/${job.id}/settings`);
     } catch (e) {
       setError(String(e));
       setCreating(false);
+    }
+  }
+
+  async function remove(id: number) {
+    setDeletingId(id);
+    setError("");
+    try {
+      await api.deleteJob(id);
+      setJobs((prev) => prev.filter((j) => j.id !== id));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDeletingId(null);
+      setConfirmId(null);
     }
   }
 
@@ -162,17 +180,32 @@ export default function JobsList() {
               transition={{ delay: i * 0.05, duration: 0.25 }}
             >
               <Card
-                onClick={() => nav(`/app/jobs/${j.id}/candidates`)}
-                className="group cursor-pointer transition-all hover:border-primary/40 hover:shadow-md"
+                onClick={() =>
+                  confirmId === j.id ? undefined : nav(`/app/jobs/${j.id}/candidates`)
+                }
+                className="group relative cursor-pointer transition-all hover:border-primary/40 hover:shadow-md"
               >
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between gap-2">
                     <CardTitle className="line-clamp-2 group-hover:text-primary">
                       {j.title}
                     </CardTitle>
-                    <Badge variant={STATUS_VARIANT[j.status]} className="capitalize">
-                      {j.status}
-                    </Badge>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Badge variant={STATUS_VARIANT[j.status]} className="capitalize">
+                        {j.status}
+                      </Badge>
+                      <button
+                        type="button"
+                        aria-label="Delete job"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmId(j.id);
+                        }}
+                        className="rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-danger/10 hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent className="flex items-center justify-between text-sm text-muted-foreground">
@@ -182,6 +215,43 @@ export default function JobsList() {
                   </span>
                   <span>{new Date(j.created_at).toLocaleDateString()}</span>
                 </CardContent>
+
+                {confirmId === j.id && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-lg bg-card/95 p-4 text-center backdrop-blur-sm"
+                  >
+                    <p className="text-sm font-medium">
+                      Delete &ldquo;{j.title}&rdquo;?
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      This permanently removes the job and all its candidates.
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setConfirmId(null)}
+                        disabled={deletingId === j.id}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        onClick={() => remove(j.id)}
+                        disabled={deletingId === j.id}
+                      >
+                        {deletingId === j.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </Card>
             </motion.div>
           ))}

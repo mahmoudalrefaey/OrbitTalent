@@ -6,7 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.db import init_db
-from app.routers import analytics, auth, candidates, jobs, usage
+from app.routers import (
+    analytics,
+    auth,
+    automation,
+    candidates,
+    jobs,
+    search,
+)
 from app.schemas import HealthOut
 
 settings = get_settings()
@@ -30,17 +37,19 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(jobs.router)
+# search must precede candidates so /candidates/compare + /candidates/search
+# aren't captured by /candidates/{candidate_id}.
+app.include_router(search.router)
 app.include_router(candidates.router)
 app.include_router(analytics.router)
-app.include_router(usage.router)
+app.include_router(automation.router)
 
 
 @app.get("/health", response_model=HealthOut)
 def health() -> HealthOut:
-    # Public endpoint (pre-login). Per-tenant cost lives behind /usage.
+    # Public endpoint used by the frontend to detect whether AI scoring is on.
     return HealthOut(
         status="ok",
         llm_enabled=settings.llm_enabled,
         provider=settings.provider,
-        today_cost_usd=0.0,
     )

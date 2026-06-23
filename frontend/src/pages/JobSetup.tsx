@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, CheckCircle2, Sparkles } from "lucide-react";
-import { api, type Criteria, type JobDetail } from "@/api/client";
+import { api, EMPTY_CRITERIA, type Criteria, type JobDetail } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -16,13 +16,7 @@ import { Label, Skeleton } from "@/components/ui/misc";
 
 type Editable = Omit<Criteria, "id" | "job_id">;
 
-const EMPTY: Editable = {
-  required_skills: [],
-  preferred_skills: [],
-  min_years: 0,
-  must_haves: [],
-  weights: { required_skills: 0.5, preferred_skills: 0.2, min_years: 0.15, must_haves: 0.15 },
-};
+const EMPTY: Editable = EMPTY_CRITERIA;
 
 const toText = (a: string[]) => a.join(", ");
 const fromText = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);

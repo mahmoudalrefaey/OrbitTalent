@@ -1,13 +1,14 @@
 """Jobs router — create/list/get jobs, extract & edit scoring criteria."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import CurrentUser
 from app.models import (
+    AutomationRule,
     Candidate,
     Job,
     JobStatus,
@@ -160,8 +161,33 @@ def update_criteria(
         "min_years": 0.15,
         "must_haves": 0.15,
     }
+    # Hiring rules (V2).
+    crit.geo_allow = payload.geo_allow
+    crit.geo_block = payload.geo_block
+    crit.min_degree = payload.min_degree
+    crit.preferred_universities = payload.preferred_universities
+    crit.min_experience = payload.min_experience
+    crit.max_experience = payload.max_experience
+    crit.ranking_weights = payload.ranking_weights
     # Confirming criteria flips the job to 'ready' to accept CVs.
     job.status = JobStatus.ready
     db.commit()
     db.refresh(crit)
     return CriteriaOut.model_validate(crit)
+
+
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_job(
+    job_id: int, user: CurrentUser, db: Session = Depends(get_db)
+) -> Response:
+    """Delete a job and everything attached to it.
+
+    The ORM relationships cascade-delete the criteria, candidates, and each
+    candidate's stage-event history. Automation rules scoped to this job have no
+    cascade relationship, so they are removed explicitly first.
+    """
+    job = _get_owned_job(db, job_id, user.tenant_id)
+    db.execute(delete(AutomationRule).where(AutomationRule.job_id == job_id))
+    db.delete(job)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

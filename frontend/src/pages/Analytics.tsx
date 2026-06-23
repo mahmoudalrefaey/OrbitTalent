@@ -125,10 +125,13 @@ export default function Analytics() {
   const stageData = Object.entries(a.stage_counts)
     .filter(([, v]) => v > 0)
     .map(([name, value]) => ({ name, value }));
-  const missingData = a.top_missing_keywords.map((m) => ({
-    name: m.keyword,
-    count: m.count,
-  }));
+  // Prefer the richer skill_gaps (has pct); fall back to legacy keyword counts.
+  const topGaps =
+    a.skill_gaps.length > 0
+      ? a.skill_gaps.slice(0, 8)
+      : a.top_missing_keywords
+          .slice(0, 8)
+          .map((m) => ({ keyword: m.keyword, count: m.count, pct: 0, example_candidate_ids: [] }));
   const tierData = ["0", "1", "2", "3"].map((k) => ({
     name: TIER_LABELS[k],
     key: k,
@@ -216,33 +219,110 @@ export default function Analytics() {
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Top missing skills</CardTitle>
-            <CardDescription>Most common skill gaps</CardDescription>
+          <CardHeader className="flex-row items-start justify-between space-y-0">
+            <div>
+              <CardTitle className="text-base">Top missing skills</CardTitle>
+              <CardDescription>Most common skill gaps</CardDescription>
+            </div>
+            <Link
+              to={`/app/jobs/${jobId}/skill-gaps`}
+              className="shrink-0 text-sm text-primary hover:underline"
+            >
+              View all
+            </Link>
           </CardHeader>
           <CardContent>
-            {missingData.length === 0 ? (
+            {topGaps.length === 0 ? (
               <EmptyChart />
             ) : (
-              <ResponsiveContainer width="100%" height={260}>
+              <div className="space-y-2.5">
+                {topGaps.map((g) => {
+                  const max = topGaps[0]?.count || 1;
+                  return (
+                    <div key={g.keyword} className="space-y-1">
+                      <div className="flex items-center justify-between gap-3 text-sm">
+                        <span className="truncate" title={g.keyword}>
+                          {g.keyword}
+                        </span>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {g.count}
+                          {g.pct ? ` · ${g.pct}%` : ""}
+                        </span>
+                      </div>
+                      <div className="h-2 overflow-hidden rounded-full bg-muted">
+                        <div
+                          className="h-full rounded-full bg-warning"
+                          style={{ width: `${Math.max((g.count / max) * 100, 4)}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Funnel + conversions */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Hiring funnel &amp; conversion</CardTitle>
+          <CardDescription>
+            Candidates reaching each stage, with stage-to-stage conversion.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {a.funnel.every((f) => f.count === 0) ? (
+            <EmptyChart />
+          ) : (
+            <div className="space-y-1.5">
+              {a.funnel.map((f) => {
+                const max = Math.max(...a.funnel.map((x) => x.count), 1);
+                return (
+                  <div key={f.stage} className="flex items-center gap-3">
+                    <span className="w-40 shrink-0 text-right text-xs capitalize text-muted-foreground">
+                      {f.stage.replace(/_/g, " ")}
+                    </span>
+                    <div className="h-7 flex-1 overflow-hidden rounded bg-muted">
+                      <div
+                        className="flex h-full items-center justify-end rounded bg-primary px-2 text-xs font-medium text-primary-foreground transition-all"
+                        style={{ width: `${Math.max((f.count / max) * 100, 6)}%` }}
+                      >
+                        {f.count}
+                      </div>
+                    </div>
+                    <span className="w-12 shrink-0 text-xs text-muted-foreground">
+                      {f.conversion_from_prev != null ? `${f.conversion_from_prev}%` : "—"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Score distribution + geography */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">AI score distribution</CardTitle>
+            <CardDescription>Overall scores bucketed (1–10)</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {Object.values(a.score_distribution).every((v) => v === 0) ? (
+              <EmptyChart />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
                 <BarChart
-                  data={missingData}
-                  layout="vertical"
-                  margin={{ left: 20 }}
+                  data={Object.entries(a.score_distribution).map(([name, count]) => ({
+                    name,
+                    count,
+                  }))}
                 >
-                  <XAxis
-                    type="number"
-                    stroke={MUTED}
-                    style={{ fontSize: 12 }}
-                    allowDecimals={false}
-                  />
-                  <YAxis
-                    type="category"
-                    dataKey="name"
-                    stroke={MUTED}
-                    style={{ fontSize: 12 }}
-                    width={120}
-                  />
+                  <XAxis dataKey="name" stroke={MUTED} style={{ fontSize: 12 }} />
+                  <YAxis stroke={MUTED} style={{ fontSize: 12 }} allowDecimals={false} />
                   <Tooltip
                     cursor={{ fill: "hsl(var(--muted))" }}
                     contentStyle={{
@@ -252,13 +332,31 @@ export default function Analytics() {
                       fontSize: 12,
                     }}
                   />
-                  <Bar
-                    dataKey="count"
-                    fill="hsl(var(--warning))"
-                    radius={[0, 4, 4, 0]}
-                  />
+                  <Bar dataKey="count" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Candidates by country</CardTitle>
+            <CardDescription>Geographic distribution</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {Object.keys(a.by_country).length === 0 ? (
+              <EmptyChart />
+            ) : (
+              Object.entries(a.by_country)
+                .sort((x, y) => y[1] - x[1])
+                .slice(0, 8)
+                .map(([country, n]) => (
+                  <div key={country} className="flex items-center justify-between text-sm">
+                    <span>{country}</span>
+                    <span className="text-muted-foreground">{n}</span>
+                  </div>
+                ))
             )}
           </CardContent>
         </Card>

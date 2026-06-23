@@ -31,7 +31,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VALUE_PROPS = [
   "Set up your first job and start screening in minutes",
   "Transparent scores you can defend to any stakeholder",
-  "No credit card required to get started",
+  "Your jobs and candidates stay private to your account",
 ];
 
 const STRENGTH_LABELS = ["Weak", "Weak", "Fair", "Good", "Strong"] as const;
@@ -87,17 +87,9 @@ function BrandPanel() {
           </ul>
         </div>
 
-        <div className="flex items-center gap-3 text-sm text-white/80">
-          <div className="flex -space-x-2">
-            {["bg-white/30", "bg-white/40", "bg-white/50"].map((c, i) => (
-              <span
-                key={i}
-                className={cn("h-8 w-8 rounded-full border-2 border-primary", c)}
-              />
-            ))}
-          </div>
-          <span>Trusted by hiring teams screening 10,000+ CVs</span>
-        </div>
+        <p className="text-sm text-white/70">
+          Explainable, cost-optimized CV screening.
+        </p>
       </div>
     </div>
   );
@@ -257,8 +249,8 @@ export default function SignUp() {
               </h1>
               <p className="mt-2 text-sm text-muted-foreground">
                 {step === 1
-                  ? "Get started free — no credit card required."
-                  : "Optional — this helps us tailor OrbitTalent. You can skip it."}
+                  ? "It only takes a minute to get started."
+                  : "Optional — this helps tailor OrbitTalent. You can skip it."}
               </p>
             </div>
 

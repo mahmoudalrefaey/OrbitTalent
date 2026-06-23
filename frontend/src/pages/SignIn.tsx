@@ -18,7 +18,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/misc";
 import { Logo } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { cn } from "@/lib/utils";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -73,20 +72,9 @@ function BrandPanel({
           </ul>
         </div>
 
-        <div className="flex items-center gap-3 text-sm text-white/80">
-          <div className="flex -space-x-2">
-            {["bg-white/30", "bg-white/40", "bg-white/50"].map((c, i) => (
-              <span
-                key={i}
-                className={cn(
-                  "h-8 w-8 rounded-full border-2 border-primary",
-                  c
-                )}
-              />
-            ))}
-          </div>
-          <span>Trusted by hiring teams screening 10,000+ CVs</span>
-        </div>
+        <p className="text-sm text-white/70">
+          Explainable, cost-optimized CV screening.
+        </p>
       </div>
     </div>
   );

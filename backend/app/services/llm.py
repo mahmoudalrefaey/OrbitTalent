@@ -1,25 +1,15 @@
-"""LLM service — OpenAI-compatible provider (g0i.ai /v1).
+"""LLM client for the g0i.ai OpenAI-compatible endpoint.
 
-Provider:
-- Uses the `openai` SDK pointed at `settings.llm_base_url` (g0i.ai's
-  OpenAI-compatible endpoint). The API key ALWAYS comes from env.
-- Structured output is obtained by asking the model for STRICT JSON matching a
-  Pydantic schema, then parsing + validating (retry once on bad JSON). This
-  works on any OpenAI-compatible chat model (e.g. qwen3-coder-80b), since not
-  all of them support native JSON-mode / tool calling.
-- Supports fallback models: if the primary model errors (plan/availability),
-  each model in `settings.fallback_model_list` is tried in order.
-- Every call records token usage + estimated cost (app.services.usage) when a
-  DB session is provided, so cost tracking works for any provider.
+Uses the `openai` SDK against `settings.llm_base_url`. Structured output is done
+by prompting for JSON and validating it against a Pydantic schema (with one
+retry on bad JSON), rather than native tool/JSON mode, since not every model on
+the gateway supports those. If the primary model errors, the fallback models in
+`settings.fallback_model_list` are tried in order. Every call records token
+usage and estimated cost when a DB session is passed.
 
-Cascade surface (see app.services.cascade):
-- `extract_criteria` — JD -> structured criteria (deep model).
-- `quick_score`      — Tier 2: one cheap call, combined prefilter + score.
-- `deep_score`       — Tier 3: deep model, precise overall score.
-- `embed`            — optional Tier 1 embedding (only if model_embed set).
-
-The public surface is the `LLMService` protocol so the pipeline can be tested
-with a fake implementation and no network calls.
+`extract_criteria`/`quick_score`/`deep_score` map to JD extraction, the Tier-2
+cheap pass, and the Tier-3 deep score respectively. The `LLMService` protocol
+lets the pipeline run against a fake in tests with no network calls.
 """
 from __future__ import annotations
 
@@ -63,10 +53,6 @@ class LLMService(Protocol):
         self, criteria_summary: str, cv_text: str,
         db: Session | None = ..., tenant_id: int = ...,
     ) -> CandidateScoreLLM: ...
-
-    def embed(
-        self, text: str, db: Session | None = ..., tenant_id: int = ...
-    ) -> list[float] | None: ...
 
 
 def criteria_summary(
@@ -280,7 +266,12 @@ class ProviderLLMService:
                 "for THIS role). job_match_pct is 0-100 (how well the "
                 "candidate's profile matches the criteria). List concrete "
                 "matched and missing skills. Keep reasoning to 2-4 sentences, "
-                "specific and fair.\n\n" + criteria_summary
+                "specific and fair.\n"
+                "ALSO extract these profile fields from the CV when present "
+                "(use null if not stated, do NOT guess): country, city, "
+                "experience_years (total years, a number), education (highest "
+                "degree + field), certifications (list), languages (list), "
+                "expected_salary (integer, if stated).\n\n" + criteria_summary
             ),
             user=f"Candidate CV:\n\n{cv_text[:12000]}",
             schema=CandidateScoreLLM,
@@ -289,32 +280,6 @@ class ProviderLLMService:
         return out or CandidateScoreLLM(
             overall_score=1, job_match_pct=0, reasoning="No structured output returned."
         )
-
-    def embed(
-        self,
-        text: str,
-        db: Session | None = None,
-        tenant_id: int = DEFAULT_TENANT_ID,
-    ) -> list[float] | None:
-        """Optional Tier-1 embedding. Returns None if disabled or unsupported."""
-        if not settings.model_embed:
-            return None
-        try:
-            resp = self._client.embeddings.create(
-                model=settings.model_embed, input=text[:8000]
-            )
-            if db is not None and getattr(resp, "usage", None) is not None:
-                usage_svc.record_usage(
-                    db,
-                    model=settings.model_embed,
-                    tier=1,
-                    usage=usage_svc.TokenUsage.from_response(resp.usage),
-                    tenant_id=tenant_id,
-                )
-            return list(resp.data[0].embedding)
-        except Exception as exc:  # noqa: BLE001 — embeddings are best-effort
-            logger.info("Embeddings unavailable (%s); skipping Tier 1.", exc)
-            return None
 
 
 def get_llm_service() -> LLMService:

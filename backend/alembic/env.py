@@ -1,8 +1,8 @@
 """Alembic migration environment.
 
-The DB URL comes from app settings (env / .env) rather than alembic.ini, so the
-same migrations target SQLite in dev and PostgreSQL in production with no config
-duplication. `target_metadata` is the app's Base.metadata for autogenerate.
+The database URL comes from app settings rather than alembic.ini, so there is a
+single source of truth. `target_metadata` is the app's Base.metadata, used for
+autogenerate.
 """
 from logging.config import fileConfig
 
@@ -33,7 +33,6 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        render_as_batch=url.startswith("sqlite"),
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -49,8 +48,6 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            # batch mode lets ALTER TABLE work on SQLite too.
-            render_as_batch=connection.dialect.name == "sqlite",
         )
         with context.begin_transaction():
             context.run_migrations()

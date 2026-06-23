@@ -11,7 +11,7 @@ import {
   Loader2,
   FileText,
 } from "lucide-react";
-import { api, type Criteria } from "@/api/client";
+import { api, EMPTY_CRITERIA, type Criteria } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input, Textarea } from "@/components/ui/input";
@@ -23,18 +23,7 @@ import { cn } from "@/lib/utils";
 
 type Editable = Omit<Criteria, "id" | "job_id">;
 
-const EMPTY: Editable = {
-  required_skills: [],
-  preferred_skills: [],
-  min_years: 0,
-  must_haves: [],
-  weights: {
-    required_skills: 0.5,
-    preferred_skills: 0.2,
-    min_years: 0.15,
-    must_haves: 0.15,
-  },
-};
+const EMPTY: Editable = EMPTY_CRITERIA;
 
 const toText = (a: string[]) => a.join(", ");
 const fromText = (s: string) =>

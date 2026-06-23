@@ -3,12 +3,25 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-*.db
+.pytest_cache/
+
+# Tests (not published)
+backend/tests/
+
+# Secrets
 .env
 
 # Node
 node_modules/
 dist/
+
+# Build artifacts
+*.tsbuildinfo
+
+# Temp / scratch
+*.output
+tmp/
+*.tmp
 
 # Editor / OS
 .DS_Store
