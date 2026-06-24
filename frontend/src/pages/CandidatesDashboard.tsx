@@ -97,6 +97,9 @@ export default function CandidatesDashboard() {
     extra?: { stage?: CandidateStage; rejection_reason?: RejectionReason }
   ) => bulk.mutate({ candidate_ids: ids, action, ...extra });
 
+  const compareSelected = () =>
+    nav(`/app/compare?ids=${ids.slice(0, 4).join(",")}`);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -266,6 +269,7 @@ export default function CandidatesDashboard() {
         onReject={(rejection_reason) => runBulk("reject", { rejection_reason })}
         onShortlist={() => runBulk("shortlist")}
         onExport={() => runBulk("export")}
+        onCompare={compareSelected}
       />
     </div>
   );

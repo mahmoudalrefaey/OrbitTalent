@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Download, Loader2, Trash2, X } from "lucide-react";
+import { Columns2, Download, Loader2, Trash2, X } from "lucide-react";
 import {
   CANDIDATE_STAGES,
   REJECTION_REASONS,
@@ -19,6 +19,8 @@ interface Props {
   onReject: (reason: RejectionReason) => void;
   onShortlist: () => void;
   onExport: () => void;
+  /** Compare is only valid for 2–4 candidates; omit to hide the action. */
+  onCompare?: () => void;
 }
 
 /** Floating toolbar shown when candidates are multi-selected. */
@@ -30,7 +32,9 @@ export function BulkActionBar({
   onReject,
   onShortlist,
   onExport,
+  onCompare,
 }: Props) {
+  const canCompare = count >= 2 && count <= 4;
   const [stage, setStage] = useState<CandidateStage>("shortlisted");
   const [reason, setReason] = useState<RejectionReason>("recruiter_decision");
 
@@ -91,6 +95,18 @@ export function BulkActionBar({
           <Button size="sm" variant="outline" disabled={busy} onClick={onExport}>
             <Download className="h-4 w-4" /> Export
           </Button>
+
+          {onCompare && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || !canCompare}
+              onClick={onCompare}
+              title={canCompare ? "Compare selected" : "Select 2–4 candidates to compare"}
+            >
+              <Columns2 className="h-4 w-4" /> Compare
+            </Button>
+          )}
 
           <Button size="icon" variant="ghost" onClick={onClear} aria-label="Clear selection">
             <X className="h-4 w-4" />
