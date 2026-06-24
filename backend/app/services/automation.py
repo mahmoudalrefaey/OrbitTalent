@@ -80,6 +80,64 @@ def _rule_matches(candidate: Candidate, rule: AutomationRule) -> bool:
     return bool(conds) and all(_condition_matches(candidate, c) for c in conds)
 
 
+_TERMINAL_STAGES = (
+    CandidateStage.rejected,
+    CandidateStage.hired,
+    CandidateStage.withdrawn,
+)
+
+
+def _apply_rule(db: Session, candidate: Candidate, rule: AutomationRule) -> str | None:
+    """Apply a single (already-matched) rule's action. Caller commits."""
+    action = rule.action_json or {}
+    atype = action.get("type")
+    if atype == "reject":
+        reason = action.get("reason", "recruiter_decision")
+        try:
+            rej = RejectionReason(reason)
+        except ValueError:
+            rej = RejectionReason.recruiter_decision
+        candidate_service.change_stage(
+            db, candidate, CandidateStage.rejected,
+            reason=f"automation: {rule.name}", rejection_reason=rej, commit=False,
+        )
+        return f"auto-reject ({rule.name})"
+    if atype == "move":
+        try:
+            stage = CandidateStage(action.get("stage"))
+        except ValueError:
+            return None
+        candidate_service.change_stage(
+            db, candidate, stage,
+            reason=f"automation: {rule.name}", commit=False,
+        )
+        return f"auto-move → {stage.value} ({rule.name})"
+    if atype == "assign":
+        candidate.assigned_recruiter_id = action.get("recruiter_id")
+        return f"auto-assign ({rule.name})"
+    return None
+
+
+def _enabled_rules_for(
+    db: Session, tenant_id: int, job_id: int, rule_ids: list[int] | None = None
+) -> list[AutomationRule]:
+    """Enabled rules for a job/tenant (job-scoped or tenant-wide), priority order.
+
+    When `rule_ids` is given, restrict to those rule ids (still tenant/enabled
+    filtered) so a manual run can target specific rules.
+    """
+    q = select(AutomationRule).where(
+        AutomationRule.tenant_id == tenant_id,
+        AutomationRule.enabled.is_(True),
+        (AutomationRule.job_id == job_id) | (AutomationRule.job_id.is_(None)),
+    )
+    if rule_ids:
+        q = q.where(AutomationRule.id.in_(rule_ids))
+    return list(
+        db.scalars(q.order_by(AutomationRule.priority.desc(), AutomationRule.id)).all()
+    )
+
+
 def apply_rules(db: Session, candidate: Candidate) -> str | None:
     """Evaluate enabled rules for this candidate's job/tenant in priority order.
 
@@ -87,51 +145,42 @@ def apply_rules(db: Session, candidate: Candidate) -> str | None:
     or None if nothing matched. Caller commits.
     """
     # Don't override a terminal decision (already rejected/hired/withdrawn).
-    if candidate.stage in (
-        CandidateStage.rejected,
-        CandidateStage.hired,
-        CandidateStage.withdrawn,
-    ):
+    if candidate.stage in _TERMINAL_STAGES:
         return None
 
-    rules = db.scalars(
-        select(AutomationRule)
-        .where(
-            AutomationRule.tenant_id == candidate.tenant_id,
-            AutomationRule.enabled.is_(True),
-            (AutomationRule.job_id == candidate.job_id)
-            | (AutomationRule.job_id.is_(None)),
-        )
-        .order_by(AutomationRule.priority.desc(), AutomationRule.id)
-    ).all()
-
+    rules = _enabled_rules_for(db, candidate.tenant_id, candidate.job_id)
     for rule in rules:
-        if not _rule_matches(candidate, rule):
-            continue
-        action = rule.action_json or {}
-        atype = action.get("type")
-        if atype == "reject":
-            reason = action.get("reason", "recruiter_decision")
-            try:
-                rej = RejectionReason(reason)
-            except ValueError:
-                rej = RejectionReason.recruiter_decision
-            candidate_service.change_stage(
-                db, candidate, CandidateStage.rejected,
-                reason=f"automation: {rule.name}", rejection_reason=rej, commit=False,
-            )
-            return f"auto-reject ({rule.name})"
-        if atype == "move":
-            try:
-                stage = CandidateStage(action.get("stage"))
-            except ValueError:
-                return None
-            candidate_service.change_stage(
-                db, candidate, stage,
-                reason=f"automation: {rule.name}", commit=False,
-            )
-            return f"auto-move → {stage.value} ({rule.name})"
-        if atype == "assign":
-            candidate.assigned_recruiter_id = action.get("recruiter_id")
-            return f"auto-assign ({rule.name})"
+        if _rule_matches(candidate, rule):
+            return _apply_rule(db, candidate, rule)
     return None
+
+
+def apply_rules_to_candidates(
+    db: Session,
+    candidates: list[Candidate],
+    *,
+    tenant_id: int,
+    job_id: int,
+    rule_ids: list[int] | None = None,
+) -> dict:
+    """Manually apply enabled rules (optionally only `rule_ids`) to candidates.
+
+    Used by the "apply rules now" action so a recruiter can run rules against
+    candidates that were uploaded before the rule existed. The first matching
+    rule per candidate wins. Terminal-stage candidates are skipped (we never
+    override a settled decision). Caller commits.
+    """
+    rules = _enabled_rules_for(db, tenant_id, job_id, rule_ids)
+    matched_ids: list[int] = []
+    if not rules:
+        return {"applied": 0, "matched_candidate_ids": []}
+
+    for candidate in candidates:
+        if candidate.stage in _TERMINAL_STAGES:
+            continue
+        for rule in rules:
+            if _rule_matches(candidate, rule):
+                _apply_rule(db, candidate, rule)
+                matched_ids.append(candidate.id)
+                break
+    return {"applied": len(matched_ids), "matched_candidate_ids": matched_ids}

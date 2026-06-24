@@ -138,7 +138,7 @@ export default function CandidatesDashboard() {
               {upload.isPending ? "Uploading…" : "Upload CVs to score"}
             </span>
             <span className="text-xs text-muted-foreground">
-              PDF, DOCX or TXT · select multiple
+              PDF, DOCX or TXT · max 2 MB each · up to 20/day
             </span>
             <input
               ref={fileRef}

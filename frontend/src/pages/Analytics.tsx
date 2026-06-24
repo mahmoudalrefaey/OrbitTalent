@@ -26,6 +26,19 @@ import { formatUsd } from "@/lib/utils";
 
 const MUTED = "hsl(var(--muted-foreground))";
 
+// Shared recharts tooltip styling. Setting an explicit text color is required:
+// recharts defaults item/label text to a dark color inline, which is unreadable
+// on the dark --card background in dark mode.
+const TOOLTIP_STYLE = {
+  background: "hsl(var(--card))",
+  border: "1px solid hsl(var(--border))",
+  borderRadius: 8,
+  fontSize: 12,
+  color: "hsl(var(--card-foreground))",
+} as const;
+const TOOLTIP_ITEM = { color: "hsl(var(--card-foreground))" };
+const TOOLTIP_LABEL = { color: "hsl(var(--muted-foreground))" };
+
 const STAGE_COLORS: Record<string, string> = {
   new: "hsl(var(--muted-foreground))",
   shortlisted: "hsl(var(--primary))",
@@ -205,12 +218,9 @@ export default function Analytics() {
                     ))}
                   </Pie>
                   <Tooltip
-                    contentStyle={{
-                      background: "hsl(var(--card))",
-                      border: "1px solid hsl(var(--border))",
-                      borderRadius: 8,
-                      fontSize: 12,
-                    }}
+                    contentStyle={TOOLTIP_STYLE}
+                    itemStyle={TOOLTIP_ITEM}
+                    labelStyle={TOOLTIP_LABEL}
                   />
                 </PieChart>
               </ResponsiveContainer>
@@ -325,12 +335,9 @@ export default function Analytics() {
                   <YAxis stroke={MUTED} style={{ fontSize: 12 }} allowDecimals={false} />
                   <Tooltip
                     cursor={{ fill: "hsl(var(--muted))" }}
-                    contentStyle={{
-                      background: "hsl(var(--card))",
-                      border: "1px solid hsl(var(--border))",
-                      borderRadius: 8,
-                      fontSize: 12,
-                    }}
+                    contentStyle={TOOLTIP_STYLE}
+                    itemStyle={TOOLTIP_ITEM}
+                    labelStyle={TOOLTIP_LABEL}
                   />
                   <Bar dataKey="count" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
                 </BarChart>

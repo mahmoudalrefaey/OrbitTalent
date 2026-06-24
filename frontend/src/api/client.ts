@@ -369,6 +369,12 @@ export const api = {
     }),
   deleteAutomationRule: (id: number) =>
     req<void>(`/automation-rules/${id}`, { method: "DELETE" }),
+  // Apply rules to a job's existing candidates (rules are not removed).
+  applyAutomationRules: (job_id: number, rule_ids?: number[]) =>
+    req<{ applied: number; matched_candidate_ids: number[] }>(
+      "/automation-rules/apply",
+      { method: "POST", body: JSON.stringify({ job_id, rule_ids: rule_ids ?? null }) }
+    ),
 
   // Multipart upload — no JSON Content-Type header.
   uploadCandidates: async (jobId: number, files: FileList): Promise<Candidate[]> => {

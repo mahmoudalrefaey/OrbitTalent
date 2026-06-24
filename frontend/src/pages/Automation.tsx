@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, Zap } from "lucide-react";
+import { Play, Plus, Trash2, Zap } from "lucide-react";
 import { api, REJECTION_REASONS, type AutomationRule } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -78,15 +78,51 @@ export default function Automation() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["automation", id] }),
   });
 
+  const [applyMsg, setApplyMsg] = useState("");
+  const apply = useMutation({
+    // rule_ids undefined → apply all enabled rules for this job.
+    mutationFn: (rule_ids?: number[]) => api.applyAutomationRules(id, rule_ids),
+    onSuccess: (res) => {
+      setApplyMsg(
+        res.applied === 0
+          ? "No current candidates matched."
+          : `Applied to ${res.applied} candidate${res.applied === 1 ? "" : "s"}.`
+      );
+      // Stages/rejections may have changed — refresh the candidates list.
+      qc.invalidateQueries({ queryKey: ["candidates", id] });
+    },
+    onError: (e) => setApplyMsg(String(e)),
+  });
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-bold tracking-tight">Automation rules</h1>
-        <p className="text-sm text-muted-foreground">
-          Auto-reject or auto-progress candidates when conditions match — applied
-          right after AI scoring.
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight">Automation rules</h1>
+          <p className="text-sm text-muted-foreground">
+            Auto-reject or auto-progress candidates when conditions match — applied
+            right after AI scoring.
+          </p>
+        </div>
+        {rules.length > 0 && (
+          <Button
+            variant="secondary"
+            onClick={() => apply.mutate(undefined)}
+            disabled={apply.isPending}
+            title="Run all enabled rules against current candidates"
+          >
+            <Play className="h-4 w-4" /> Apply all rules now
+          </Button>
+        )}
       </div>
+
+      {applyMsg && (
+        <Card>
+          <CardContent className="py-3 text-sm text-muted-foreground">
+            {applyMsg}
+          </CardContent>
+        </Card>
+      )}
 
       {/* New rule */}
       <Card>
@@ -182,14 +218,29 @@ export default function Automation() {
                   </div>
                   {!r.enabled && <Badge variant="secondary">disabled</Badge>}
                 </div>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  onClick={() => del.mutate(r.id)}
-                  aria-label="Delete rule"
-                >
-                  <Trash2 className="h-4 w-4 text-danger" />
-                </Button>
+                <div className="flex shrink-0 items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => apply.mutate([r.id])}
+                    disabled={apply.isPending || !r.enabled}
+                    title={
+                      r.enabled
+                        ? "Apply this rule to current candidates"
+                        : "Enable the rule to apply it"
+                    }
+                  >
+                    <Play className="h-4 w-4" /> Apply
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => del.mutate(r.id)}
+                    aria-label="Delete rule"
+                  >
+                    <Trash2 className="h-4 w-4 text-danger" />
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           ))}
