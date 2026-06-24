@@ -8,191 +8,271 @@
 
 ---
 
-## Project Overview
+## Table of Contents
 
-OrbitTalent is a multi-tenant ATS (applicant tracking system) that screens CVs
-against a job description and surfaces an explainable, ranked shortlist. A
-recruiter creates a job, lets the system extract structured hiring criteria from
-the job description, uploads a batch of CVs, and receives — for each candidate —
-an overall fit score, a job-match percentage, an ATS-readiness score, matched
-and missing skills, and a short rationale.
+- [What OrbitTalent Is](#what-orbittalent-is)
+- [What's Inside](#whats-inside)
+- [How It Works Internally](#how-it-works-internally)
+  - [The Scoring Cascade](#the-scoring-cascade)
+  - [The Per-CV Pipeline](#the-per-cv-pipeline)
+  - [Deterministic Engines](#deterministic-engines)
+  - [The LLM Layer](#the-llm-layer)
+  - [Data Model](#data-model)
+  - [Multi-Tenancy & Isolation](#multi-tenancy--isolation)
+  - [Request Lifecycle](#request-lifecycle)
+  - [Frontend Architecture](#frontend-architecture)
+- [Technology Stack](#technology-stack)
+- [Project Structure](#project-structure)
+- [API Surface](#api-surface)
+- [Running Locally](#running-locally)
+- [Development Workflow](#development-workflow)
+- [Design Decisions & Trade-offs](#design-decisions--trade-offs)
+- [Troubleshooting](#troubleshooting)
+- [Roadmap](#roadmap)
 
-Scoring runs through a cost-optimized cascade: cheap deterministic checks filter
-out clearly unqualified candidates before any paid model is called, and the
-expensive model only scores the candidates that warrant it. Every account is an
-isolated tenant, so recruiters only ever see their own jobs and candidates.
+---
 
-## Key Features
+## What OrbitTalent Is
 
-- **Cascade scoring** — four tiers (deterministic rules, lexical similarity, a
-  cheap model pass, a deep model pass) so most CVs never reach the expensive
-  model. Per-candidate cost is tracked and shown in analytics.
-- **AI criteria extraction** — paste a job description and the system extracts
-  required/preferred skills, minimum experience, and must-haves for review.
-- **Full ATS lifecycle** — thirteen candidate stages from `new` through `hired`,
-  with an append-only stage history that powers funnel and conversion analytics.
-- **Rejection workflow** — candidates filtered by the cascade are moved to a
-  `rejected` stage with a reason, visible in a dedicated rejected view.
-- **Automation rules** — auto-reject, auto-advance, or auto-assign candidates
-  based on score, experience, location, and other conditions.
-- **Bulk actions** — move, reject, shortlist, or export many candidates at once.
-- **Search and comparison** — structured filters plus free-text (BM25) ranking,
-  and side-by-side comparison of up to four candidates.
-- **Analytics** — per-job dashboards (funnel, conversion, score distribution,
-  skill gaps, geography) and an organization-wide overview, with CSV export.
-- **Authentication and isolation** — email/password auth with JWT session
-  cookies; every record is scoped to the owning tenant.
+OrbitTalent is a **multi-tenant applicant tracking system (ATS)** that screens CVs
+against a job description and produces an explainable, ranked shortlist. The core
+problem it solves: a recruiter facing hundreds of CVs needs to know *which ones
+are worth a human's time* — and *why* — without paying to run an expensive
+language model over every résumé.
 
-## Architecture Overview
+The recruiter's journey is:
+
+1. **Create a job** and paste the job description.
+2. **Extract hiring criteria** — the system reads the description and proposes
+   required/preferred skills, minimum experience, and must-haves for review.
+3. **Upload a batch of CVs** (PDF, DOCX, or TXT).
+4. **Receive, per candidate:** an overall fit score (1–10), a job-match percentage,
+   an ATS-readiness score, matched/missing skills, and a short rationale.
+5. **Work the pipeline** — move candidates through stages, reject with reasons,
+   apply automation rules, compare side-by-side, and read analytics.
+
+The defining idea is **cost-optimized cascade scoring**: cheap, deterministic
+checks filter out clearly unqualified candidates *before* any paid model is
+called, and the expensive model only ever runs on the candidates that warrant it.
+Most CVs are resolved for free.
+
+---
+
+## What's Inside
+
+| Capability | What it does |
+|------------|--------------|
+| **Cascade scoring** | Four tiers (deterministic rules → lexical similarity → cheap model → deep model). Each CV exits at the cheapest tier that yields a confident answer. Per-candidate cost is tracked. |
+| **AI criteria extraction** | Turns a free-text job description into structured, screenable criteria for the recruiter to confirm or edit. |
+| **Full ATS lifecycle** | Thirteen candidate stages (`new` → … → `hired`, plus `rejected`/`withdrawn`), with an append-only history that powers funnel and conversion analytics. |
+| **Rejection workflow** | Candidates filtered by the cascade are auto-moved to `rejected` with a machine-set reason; visible in a dedicated view. |
+| **Automation rules** | Recruiter-defined conditions (score, experience, location, missing-skill count, …) that auto-reject, auto-advance, or auto-assign candidates after scoring. |
+| **Bulk actions** | Move, reject, shortlist, or export many candidates at once. |
+| **Search & comparison** | Structured filters plus free-text (BM25) ranking; side-by-side comparison of up to four candidates. |
+| **Analytics** | Per-job dashboards (funnel, conversion, score distribution, skill gaps, geography) and an org-wide rollup, with CSV export. |
+| **Usage & cost tracking** | Every model call records token counts and an estimated cost, rolled up per candidate, per job, and per tenant. |
+| **Auth & isolation** | Email/password auth with JWT session cookies; every record is scoped to the owning tenant. Per-IP rate limiting on auth endpoints. |
+
+---
+
+## How It Works Internally
+
+This section explains the mechanics — the part a new contributor needs to
+understand the system, not just operate it.
+
+### The Scoring Cascade
+
+The cascade (`services/cascade.py`) is the heart of OrbitTalent. For each CV it
+runs a sequence of tiers and **stops at the first one that can answer
+confidently**, so paid model calls are the exception, not the rule.
 
 ```
-                         Browser (React SPA)
-                                |
-                      Vite dev server / static host
-                                |  /api proxy
-                                v
-                         FastAPI application
-        ┌───────────────────────┼───────────────────────────┐
-        |                       |                            |
-   Auth & tenancy        Scoring pipeline              Analytics & search
-   (JWT cookie,          (cascade, background          (aggregation,
-    per-user tenant)      task per CV)                  BM25 ranking)
-        |                       |                            |
-        └───────────────────────┼───────────────────────────┘
-                                |
-                       SQLAlchemy + Alembic
-                                |
-                            PostgreSQL
+  Tier 0  ── deterministic gate ───────────────────────────────  free
+            parse + ATS score + required-skill keyword coverage
+            └─ matches none of the required skills? → filtered_out (stop)
 
-   Scoring cascade calls out to an OpenAI-compatible LLM endpoint (g0i.ai).
+  Tier 1  ── lexical similarity gate ──────────────────────────  free
+            BM25(CV vs JD) + weighted skill overlap, scored 0–100
+            └─ below the similarity threshold? → filtered_out (stop)
+
+  Tier 2  ── cheap model: screen + score in one call ──────────  low cost
+            returns match%, self-reported confidence, gaps, summary
+            └─ confident AND not a top candidate? → scored (stop)
+
+  Tier 3  ── deep model: precise score + enrichment ───────────  high cost
+            1–10 overall, rationale, matched/missing skills, and
+            profile fields (country, experience, education, …)
 ```
 
-The scoring cascade is the core of the system. For each uploaded CV, a
-background task runs the following tiers and stops at the cheapest one that
-yields a confident answer:
+Two rules govern the Tier-2 → Tier-3 decision:
 
-| Tier | What it does | Cost | Where |
-|------|--------------|------|-------|
-| 0 | Parse the file, score ATS-readiness, and check required-skill keyword coverage. CVs that match none of the required skills stop here. | free | `cv_parser`, `ats_scorer`, `keyword_matcher` |
-| 1 | Deterministic lexical similarity between the CV and the job description (BM25 plus weighted skill overlap). Poor matches stop here. | free | `similarity`, `cascade` |
-| 2 | A single cheap-model call that screens and scores in one shot. If the model is confident and the candidate is not a top match, this score is final. | low | `llm.quick_score` |
-| 3 | A deep-model call producing a precise 1–10 score, rationale, and profile enrichment, only for borderline or strong candidates. | high | `llm.deep_score` |
+- A **confident** cheap score (`confidence ≥ tier2_accept_confidence`) is accepted
+  as final — *unless* the candidate looks strong.
+- A **strong** candidate (`match_pct ≥ tier3_escalate_match_pct`) always escalates
+  to the deep model, because top matches deserve a precise, defensible score.
 
-Candidates filtered at any tier are moved to the `rejected` stage. Automation
-rules are evaluated after scoring completes.
+Every threshold (`TIER0_MIN_COVERAGE`, `TIER1_MIN_SIMILARITY`,
+`TIER2_ACCEPT_CONFIDENCE`, `TIER3_ESCALATE_MATCH_PCT`) is configurable, so you can
+trade cost against thoroughness without touching code.
+
+### The Per-CV Pipeline
+
+`services/pipeline.py` orchestrates one candidate end-to-end. It runs as a
+**background task** (FastAPI `BackgroundTasks`) so the upload request returns
+immediately (`202 Accepted`) while scoring proceeds asynchronously. The frontend
+polls until each candidate leaves the `pending`/`processing` state.
+
+```
+upload → row created (status: pending)
+            │
+            ▼  background task (own DB session + LLM service)
+   1. parse_cv()        extract text + structural signals
+   2. score_ats()       ATS-readiness (0–100), always runs
+   3. match_keywords()  matched / missing skills, always runs
+   4. run_cascade()     Tier 0→3 (only if an LLM service is configured)
+   5. cost telemetry    sum usage rows written during this run
+   6. auto-reject       if filtered_out → move to `rejected` stage
+   7. automation rules  evaluate tenant/job rules on the final state
+            │
+            ▼
+   row updated (status: scored | filtered_out | failed)
+```
+
+Key resilience properties:
+
+- **One bad CV never sinks the batch.** The pipeline catches exceptions per
+  candidate and records the error on that row (`status: failed`).
+- **The deterministic layer always runs.** Even with no LLM key configured, every
+  CV still gets an ATS score and keyword match; it simply stays `pending` instead
+  of receiving an AI score.
+- **Uploads are bounded.** A rolling 24-hour per-tenant quota and a per-file size
+  cap are enforced *before* any row is created, so an oversized or excessive batch
+  is rejected atomically rather than partially processed.
+
+### Deterministic Engines
+
+These run with no network calls and are independently unit-tested — they're what
+make Tiers 0–1 free.
+
+- **`cv_parser.py`** — dispatches on file extension to pdfplumber (PDF),
+  python-docx (DOCX), or plain decode (TXT). It extracts text *and* structural
+  signals (page count, word count, presence of images/tables) that the ATS scorer
+  consumes. It never raises; parse failures are surfaced as a field on the result.
+- **`ats_scorer.py`** — scores *CV hygiene* (would an automated parser read this
+  cleanly?), independent of the job: contact info present, standard sections,
+  sensible length, structural hazards like multi-column tables or image-only text.
+- **`keyword_matcher.py`** — word-boundary-aware skill matching with an alias map
+  (so `js`/`javascript`, `k8s`/`kubernetes`, `c#`/`.net` all unify) and correct
+  handling of symbol-bearing tokens like `c++` and `node.js`.
+- **`similarity.py`** — a from-scratch **Okapi BM25** implementation plus weighted
+  skill overlap (required skills count double preferred). Powers both the Tier-1
+  gate and free-text search ranking. Deterministic and zero-cost, chosen because
+  the target LLM endpoint exposes no embedding models.
+
+### The LLM Layer
+
+`services/llm.py` wraps an **OpenAI-compatible** chat endpoint and exposes three
+operations: `extract_criteria` (JD → criteria), `quick_score` (Tier 2), and
+`deep_score` (Tier 3). It is defined as a `Protocol`, so tests substitute a fake
+implementation with no network access.
+
+Notable internals:
+
+- **Structured output without native JSON mode.** Rather than rely on a provider
+  feature that not every gateway supports, it prompts for a strict JSON object,
+  extracts it from the response (tolerating code fences/prose), and validates
+  against a Pydantic schema — retrying once with a stricter nudge on bad JSON.
+- **Model fallbacks.** If the primary model errors, configured fallback models are
+  tried in order before giving up. A failed call returns a safe default so the
+  pipeline degrades rather than crashes.
+- **Cost accounting on every call.** Token counts are normalized across provider
+  response shapes and written as usage rows, which the analytics layer aggregates.
+
+### Data Model
+
+Defined in `models.py` (SQLAlchemy). The central entities:
+
+```
+Tenant 1──1 User                  (each user owns exactly one tenant = isolation boundary)
+   │
+   ├──* Job ──1 ScoringCriteria    (required/preferred skills, min years, hiring rules)
+   │      │
+   │      └──* Candidate           (scores, profile fields, stage, cascade telemetry)
+   │             └──* StageEvent   (append-only stage-transition history)
+   │
+   ├──* AutomationRule             (JSON conditions + action; tenant- or job-scoped)
+   └──* UsageRecord                (one row per LLM call: tokens, tier, cost)
+```
+
+- A **Candidate** carries three distinct scores — `ats_score` (0–100, hygiene),
+  `job_match_pct` (0–100, fit), and `overall_score` (1–10, hire-worthiness) — plus
+  cascade telemetry (`tier_reached`, `cache_hit`, `est_cost_usd`) and
+  LLM-extracted profile fields (country, experience, education, languages, …).
+- **StageEvent** is append-only and is the single source of truth for funnel,
+  conversion-rate, and time-in-stage analytics. Every stage change — manual, bulk,
+  or automation — flows through one helper (`candidate_service.change_stage`) so
+  no transition goes unrecorded.
+- **Automation rules** store their conditions and action as JSON, so the rule
+  vocabulary can grow without database migrations.
+
+### Multi-Tenancy & Isolation
+
+Isolation is enforced at the query layer, not by middleware:
+
+- Each registered user gets their **own tenant**; the 1:1 mapping is the
+  data-isolation boundary.
+- Every router resolves the caller via an auth dependency (`deps.py`) and then
+  fetches records through ownership-checking helpers (`_owned_job`,
+  `_owned_candidate`, …) or filters explicitly on `tenant_id`.
+- Cross-tenant access returns **404, not 403**, so the existence of another
+  tenant's records is never revealed (IDOR-safe).
+
+### Request Lifecycle
+
+1. The browser sends a request with the `ot_session` cookie (httpOnly).
+2. The auth dependency decodes the JWT, loads the user, and resolves the tenant —
+   or returns `401`.
+3. The router validates the body against a Pydantic schema, performs the
+   ownership check, and runs the business logic (often delegating to a service).
+4. The response is serialized through a Pydantic response model — which also
+   guarantees sensitive fields (e.g. password hashes) are never emitted.
+
+Auth endpoints (`/auth/login`, `/auth/register`) additionally pass through a
+small in-memory, per-IP sliding-window rate limiter to blunt brute-force and
+credential-stuffing attempts.
+
+### Frontend Architecture
+
+A **React + TypeScript SPA** built with Vite.
+
+- **Data layer:** a single typed API client (`api/client.ts`) wraps `fetch`,
+  attaches credentials, and maps non-2xx responses to a typed `ApiError`. All
+  server state flows through **TanStack Query**, which handles caching,
+  background refetching, and — for candidates still scoring — polling until the
+  status settles.
+- **Auth:** an `AuthProvider` context hydrates the session once on load (via
+  `/auth/me`) and exposes `login`/`register`/`logout`. A `RequireAuth` route
+  guard gates the authenticated area.
+- **Routing:** React Router with a marketing/auth/app split. The app area uses
+  nested layouts (an app shell, then a tabbed job workspace).
+- **Single origin in production:** the client always calls a relative `/api/*`
+  path. In development a Vite proxy forwards that to the backend; in production a
+  host-level rewrite does the same. Because the browser only ever sees one
+  origin, the `SameSite=Lax` session cookie works without cross-site cookie
+  configuration.
+
+---
 
 ## Technology Stack
 
-**Backend**
+**Backend** — Python · FastAPI · SQLAlchemy ORM · Alembic · PostgreSQL · PyJWT +
+bcrypt · OpenAI SDK (against an OpenAI-compatible endpoint) · pdfplumber +
+python-docx · pytest.
 
-- Python, FastAPI
-- SQLAlchemy ORM, Alembic migrations
-- PostgreSQL
-- PyJWT and bcrypt for authentication
-- OpenAI SDK targeting an OpenAI-compatible endpoint
-- pdfplumber and python-docx for CV parsing
-- pytest for tests
+**Frontend** — React · TypeScript · Vite · TanStack Query · Tailwind CSS · Framer
+Motion · Recharts · React Router.
 
-**Frontend**
-
-- React, TypeScript, Vite
-- TanStack Query for data fetching and caching
-- Tailwind CSS for styling
-- Framer Motion for animation
-- Recharts for charts
-- React Router for navigation
-
-## Installation Guide
-
-### Prerequisites
-
-- Python 3.11 or newer
-- Node.js 18 or newer
-- PostgreSQL 14 or newer
-
-### Backend
-
-```bash
-cd backend
-python -m venv .venv
-. .venv/Scripts/activate        # macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Create a `backend/.env` file with the variables listed under
-[Environment Configuration](#environment-configuration). The defaults work for
-local development; the only value worth setting immediately is `LLM_API_KEY` to
-enable AI scoring.
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-```
-
-## Environment Configuration
-
-Backend configuration is read from `backend/.env`. Create that file with the
-values below:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `LLM_API_KEY` | for AI scoring | API key for the LLM endpoint. Without it, only deterministic scoring runs. |
-| `LLM_BASE_URL` | no | OpenAI-compatible endpoint. Defaults to `https://api.g0i.ai/v1` (the `/v1` suffix is required). |
-| `MODEL_DEEP` | no | Model id for the deep (Tier 3) pass. Defaults to `gpt-4o`. |
-| `MODEL_CHEAP` | no | Model id for the cheap (Tier 2) pass. Defaults to `gpt-4o-mini`. |
-| `FALLBACK_MODELS` | no | Comma-separated model ids tried in order if the primary errors. |
-| `JWT_SECRET` | in production | Secret used to sign session cookies. The dev default is insecure and logs a warning. |
-| `JWT_EXPIRE_DAYS` | no | Session lifetime in days (default 7). |
-| `COOKIE_SECURE` | no | Set `true` when serving over HTTPS so the cookie gets the `Secure` flag. |
-| `DATABASE_URL` | yes | PostgreSQL connection URL, e.g. `postgresql+psycopg://user:pass@host:5432/orbittalent`. |
-| `CORS_ORIGINS` | no | Comma-separated allowed origins (default covers the Vite dev server). |
-| `TIER0_MIN_COVERAGE`, `TIER1_MIN_SIMILARITY`, `TIER2_ACCEPT_CONFIDENCE`, `TIER3_ESCALATE_MATCH_PCT` | no | Cascade tuning thresholds. |
-
-Generate a strong `JWT_SECRET` with:
-
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(48))"
-```
-
-**Privacy note:** CV text (which contains candidate personal data) is sent to
-whatever `LLM_BASE_URL` points at. Only configure a provider you are permitted
-to share that data with.
-
-## Running the Application
-
-Run the backend and frontend in separate terminals.
-
-```bash
-# Terminal 1 — backend
-cd backend
-. .venv/Scripts/activate
-uvicorn app.main:app --reload --port 8000
-
-# Terminal 2 — frontend
-cd frontend
-npm run dev
-```
-
-The app is served at `http://localhost:5173` and proxies `/api` to the backend
-on port 8000. Interactive API documentation is available at
-`http://localhost:8000/docs`.
-
-Create the database schema before first run with `alembic upgrade head` (see
-Deployment Instructions). The application also creates any missing tables on
-startup as a convenience for local development.
-
-### Using the application
-
-1. Register an account and create a job, pasting in the job description.
-2. On the job's Settings tab, extract criteria with AI or enter them manually,
-   then confirm.
-3. On the Candidates tab, upload CVs (PDF, DOCX, or TXT) and watch them score in
-   real time.
-4. Review the ranked list, drill into candidates, move them through stages, or
-   apply bulk actions.
-5. Use the Analytics, Skill Gaps, and Rejected tabs to review the pipeline.
+---
 
 ## Project Structure
 
@@ -202,22 +282,24 @@ OrbitTalent/
 │   ├── alembic/                 Database migrations
 │   ├── app/
 │   │   ├── routers/             API endpoints (auth, jobs, candidates,
-│   │   │                        analytics, search, automation, usage)
+│   │   │                        analytics, search, automation)
 │   │   ├── services/            Business logic
 │   │   │   ├── cascade.py       Tiered scoring orchestration
+│   │   │   ├── pipeline.py      Per-CV scoring pipeline (background task)
 │   │   │   ├── similarity.py    BM25 + skill-overlap engine
 │   │   │   ├── llm.py           LLM client (structured output, fallbacks)
-│   │   │   ├── pipeline.py      Per-CV scoring pipeline
-│   │   │   ├── automation.py    Automation rule evaluation
-│   │   │   ├── analytics_service.py
-│   │   │   ├── candidate_service.py
-│   │   │   ├── cv_parser.py     PDF/DOCX/TXT text extraction
 │   │   │   ├── ats_scorer.py    ATS-readiness scoring
+│   │   │   ├── cv_parser.py     PDF/DOCX/TXT text extraction
 │   │   │   ├── keyword_matcher.py
-│   │   │   └── usage.py         Token/cost tracking
+│   │   │   ├── automation.py    Automation-rule evaluation
+│   │   │   ├── candidate_service.py  Stage transitions + history
+│   │   │   ├── analytics_service.py  Aggregation helpers
+│   │   │   ├── ratelimit.py     Per-IP auth rate limiter
+│   │   │   ├── auth.py          Password hashing + session JWTs
+│   │   │   └── usage.py         Token / cost tracking
 │   │   ├── models.py            SQLAlchemy models
 │   │   ├── schemas.py           Pydantic request/response models
-│   │   ├── config.py            Settings
+│   │   ├── config.py            Settings (env-driven)
 │   │   ├── db.py                Engine and session
 │   │   ├── deps.py              Auth dependency
 │   │   └── main.py              Application entry point
@@ -231,13 +313,16 @@ OrbitTalent/
 │   │   ├── api/client.ts        Typed API client
 │   │   └── lib/                 Utilities
 │   └── package.json
-└── docs/                        Documentation and assets
+└── README.md
 ```
 
-## API Overview
+---
+
+## API Surface
 
 All application endpoints require an authenticated session (the `ot_session`
-cookie). Registration and login are public.
+cookie); registration and login are public. The full interactive schema is at
+`/docs` when the backend is running.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -262,46 +347,90 @@ cookie). Registration and login are public.
 | GET | `/analytics/overview` | Organization-wide rollup |
 | GET / POST | `/automation-rules` | List or create rules |
 | PUT / DELETE | `/automation-rules/{id}` | Update or delete a rule |
-| GET | `/usage` | Token usage and cost summary |
 | GET | `/health` | Liveness and provider info |
 
-The full, interactive schema is available at `/docs` when the backend is
-running.
+---
 
-## Configuration Options
+## Running Locally
 
-- **LLM provider** — point `LLM_BASE_URL` at any OpenAI-compatible endpoint and
-  set `MODEL_DEEP` / `MODEL_CHEAP` to ids that provider serves. Structured
-  output is produced by prompting for JSON and validating it, so native
-  tool/JSON-mode support is not required.
-- **Cascade thresholds** — tune `TIER1_MIN_SIMILARITY` and the other `TIER*`
-  variables to trade cost against thoroughness. Lower thresholds send more
-  candidates to the paid models.
-- **Cost estimates** — per-model pricing lives in `config.py` (`price_*`
-  fields) and can be overridden via environment variables to match your
-  provider's rates.
+### Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- PostgreSQL 14+
+
+### Backend
+
+```bash
+cd backend
+python -m venv .venv
+. .venv/Scripts/activate        # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Create a `backend/.env` (see [Configuration](#configuration)). The defaults work
+for local development; the one value worth setting immediately is `LLM_API_KEY`
+to enable AI scoring.
+
+### Frontend
+
+```bash
+cd frontend
+npm install
+```
+
+### Run both (separate terminals)
+
+```bash
+# Terminal 1 — backend
+cd backend && . .venv/Scripts/activate
+uvicorn app.main:app --reload --port 8000
+
+# Terminal 2 — frontend
+cd frontend && npm run dev
+```
+
+The app is served at `http://localhost:5173` and proxies `/api` to the backend on
+port 8000. Interactive API docs are at `http://localhost:8000/docs`. For local
+development the app auto-creates any missing tables on startup; in any real
+deployment, migrations (`alembic upgrade head`) are authoritative.
+
+### Try it
+
+1. Register an account and create a job, pasting in the job description.
+2. On the job's Settings tab, extract criteria with AI or enter them manually,
+   then confirm.
+3. On the Candidates tab, upload CVs and watch them score in real time.
+4. Review the ranked list, drill into candidates, move them through stages, or
+   apply bulk actions.
+5. Explore the Analytics, Skill Gaps, and Rejected tabs.
+
+---
+
+
+### Deployment shape (conceptual)
+
+In production the **frontend is served as a static SPA** and the **backend runs
+behind a TLS-terminating reverse proxy**, so the browser only ever talks to a
+single HTTPS origin that rewrites `/api/*` to the backend. The backend process
+itself binds to localhost and is reached only through the proxy. This README
+intentionally omits host-specific provisioning steps — see internal operations
+docs for environment specifics.
+
+---
 
 ## Development Workflow
 
 Run the backend tests (no network required; LLM calls are stubbed):
 
 ```bash
-cd backend
-pytest
-```
-
-An optional live smoke test against the real provider runs only when a key is
-present:
-
-```bash
-LLM_API_KEY=sk-... pytest tests/test_llm_smoke.py -s
+cd backend && pytest
 ```
 
 Type-check and build the frontend:
 
 ```bash
-cd frontend
-npm run build
+cd frontend && npm run build
 ```
 
 After changing SQLAlchemy models, generate and apply a migration:
@@ -312,27 +441,47 @@ alembic revision --autogenerate -m "describe the change"
 alembic upgrade head
 ```
 
+---
+
+## Design Decisions & Trade-offs
+
+- **Why a cascade instead of one model call per CV?** Cost. The deterministic
+  tiers are free and resolve the majority of CVs (obvious non-matches and clear
+  fits), so paid calls concentrate on the genuinely borderline middle. Cost is
+  tracked per candidate so the savings are visible.
+- **Why BM25 instead of embeddings?** The target LLM endpoint exposes no
+  embedding models, and lexical ranking is deterministic, offline, and free — a
+  good fit for a gate that must run on every CV.
+- **Why background tasks instead of a job queue?** Simplicity at current volume.
+  Uploads return immediately and the frontend polls. A dedicated async queue is on
+  the roadmap for higher throughput.
+- **Why one tenant per user?** It makes isolation trivial to reason about for the
+  MVP. Team accounts (many users per tenant, with roles) are a planned evolution.
+- **Why JSON-prompt structured output instead of native JSON mode?** Portability
+  across OpenAI-compatible gateways that may not implement tool/JSON mode; the
+  validate-and-retry loop keeps it robust.
+
+---
+
 ## Troubleshooting
 
-- **AI scoring is disabled / criteria extraction returns 503** — `LLM_API_KEY`
-  is not set. Deterministic scoring still runs without it.
-- **403 from the LLM provider** — the configured model is not available on your
-  plan. Set `MODEL_DEEP` / `MODEL_CHEAP` to ids the provider serves (list them
-  at the provider's `/v1/models` endpoint) or add `FALLBACK_MODELS`.
-- **`JWT_SECRET is using the insecure dev default` warning** — set `JWT_SECRET`
-  in the environment.
-- **Duplicate key on `tenants_pkey` during registration** — the tenant id
-  sequence is out of sync, usually from manually seeded rows. Reset it with
-  `SELECT setval(pg_get_serial_sequence('tenants','id'), COALESCE((SELECT MAX(id) FROM tenants),0)+1, false);`.
-- **No candidates ever reach a given tier** — adjust the corresponding `TIER*`
-  threshold; a threshold set too permissively means that gate never fires.
+- **AI scoring disabled / criteria extraction returns 503** — `LLM_API_KEY` is not
+  set. Deterministic scoring still runs without it.
+- **403 from the LLM provider** — the configured model isn't available on your
+  plan. Set `MODEL_DEEP`/`MODEL_CHEAP` to ids the provider serves, or add
+  `FALLBACK_MODELS`.
+- **`JWT_SECRET is using the insecure dev default` warning** — set `JWT_SECRET`.
+- **No candidates ever reach a given tier** — adjust the matching `TIER*`
+  threshold; one set too permissively means that gate never fires.
+- **`429` on upload** — the rolling 24h per-tenant upload quota is exhausted, or
+  the batch exceeds the remaining quota.
 
-## Future Enhancements
+---
 
-- Team accounts: multiple recruiters within a single tenant, with roles and
-  candidate assignment across a shared pipeline.
-- Email and ATS ingestion of candidates in addition to manual upload.
-- An asynchronous job queue to replace in-process background tasks at higher
-  volume.
+## Roadmap
+
+- Team accounts: multiple recruiters per tenant, with roles and shared pipelines.
+- Email / ATS ingestion of candidates in addition to manual upload.
+- An asynchronous job queue to replace in-process background tasks at volume.
 - Password reset and email verification.
 - Richer export formats (Excel, PDF) beyond CSV.
