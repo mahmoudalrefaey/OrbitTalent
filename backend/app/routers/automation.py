@@ -8,8 +8,14 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import CurrentUser
-from app.models import AutomationRule, Job
-from app.schemas import AutomationRuleBase, AutomationRuleOut
+from app.models import AutomationRule, Candidate, Job, ScoreStatus
+from app.schemas import (
+    ApplyRulesRequest,
+    ApplyRulesResult,
+    AutomationRuleBase,
+    AutomationRuleOut,
+)
+from app.services import automation as automation_svc
 
 router = APIRouter(prefix="/automation-rules", tags=["automation"])
 
@@ -53,6 +59,53 @@ def create_rule(
     db.commit()
     db.refresh(rule)
     return AutomationRuleOut.model_validate(rule)
+
+
+@router.post("/apply", response_model=ApplyRulesResult)
+def apply_rules_now(
+    payload: ApplyRulesRequest, user: CurrentUser, db: Session = Depends(get_db)
+) -> ApplyRulesResult:
+    """Apply automation rules to a job's already-uploaded candidates.
+
+    Triggers evaluation only — rules are not modified or removed, so they keep
+    firing automatically on future CVs. Applies to scored, non-terminal
+    candidates (terminal stages are skipped inside the service).
+    """
+    job = db.get(Job, payload.job_id)
+    if job is None or job.tenant_id != user.tenant_id:
+        raise HTTPException(404, "Job not found")
+
+    # If specific rules were named, verify each belongs to the caller's tenant.
+    if payload.rule_ids:
+        owned = db.scalars(
+            select(AutomationRule.id).where(
+                AutomationRule.id.in_(payload.rule_ids),
+                AutomationRule.tenant_id == user.tenant_id,
+            )
+        ).all()
+        missing = set(payload.rule_ids) - set(owned)
+        if missing:
+            raise HTTPException(404, "Rule not found")
+
+    candidates = list(
+        db.scalars(
+            select(Candidate).where(
+                Candidate.tenant_id == user.tenant_id,
+                Candidate.job_id == payload.job_id,
+                Candidate.score_status == ScoreStatus.scored,
+            )
+        ).all()
+    )
+
+    result = automation_svc.apply_rules_to_candidates(
+        db,
+        candidates,
+        tenant_id=user.tenant_id,
+        job_id=payload.job_id,
+        rule_ids=payload.rule_ids,
+    )
+    db.commit()
+    return ApplyRulesResult(**result)
 
 
 @router.put("/{rule_id}", response_model=AutomationRuleOut)

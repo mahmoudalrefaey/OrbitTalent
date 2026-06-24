@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     jwt_expire_days: int = 7
     cookie_secure: bool = False  # set true behind HTTPS for the Secure flag
 
+    # --- Upload limits ------------------------------------------------------
+    # Max CV uploads per user (== per tenant; users are 1:1 with tenants) in a
+    # rolling 24h window, and the max size of a single uploaded file.
+    daily_upload_limit: int = 20
+    max_upload_mb: int = 2
+
     # --- Cascade tuning -----------------------------------------------------
     # Minimum required-skill keyword coverage to clear Tier 0.
     tier0_min_coverage: float = 0.05

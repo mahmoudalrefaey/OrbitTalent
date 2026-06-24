@@ -250,6 +250,22 @@ class AutomationRuleOut(AutomationRuleBase):
     id: int
 
 
+class ApplyRulesRequest(BaseModel):
+    """Manually apply automation rules to a job's existing candidates.
+
+    `rule_ids` null/empty → apply all enabled rules for the job; otherwise only
+    the listed rules. Rules are not modified or removed — this just re-evaluates.
+    """
+
+    job_id: int
+    rule_ids: list[int] | None = None
+
+
+class ApplyRulesResult(BaseModel):
+    applied: int
+    matched_candidate_ids: list[int] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Analytics (API)
 # --------------------------------------------------------------------------- #

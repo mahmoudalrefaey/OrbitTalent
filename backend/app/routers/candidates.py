@@ -1,6 +1,8 @@
 """Candidates router — upload CVs, list/rank, detail, stage updates."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -10,9 +12,10 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.deps import CurrentUser
 from app.models import (
@@ -35,6 +38,7 @@ from app.services import candidate_service, llm
 from app.services.pipeline import process_candidate
 
 router = APIRouter(tags=["candidates"])
+settings = get_settings()
 
 
 def _owned_job(db: Session, job_id: int, tenant_id: int) -> Job:
@@ -79,13 +83,52 @@ async def upload_candidates(
     if not files:
         raise HTTPException(400, "No files uploaded")
 
-    created: list[Candidate] = []
+    # Daily upload quota (rolling 24h, per user == per tenant). Reject the whole
+    # batch if it would exceed the cap, so partial uploads don't surprise users.
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    used = (
+        db.scalar(
+            select(func.count(Candidate.id)).where(
+                Candidate.tenant_id == user.tenant_id,
+                Candidate.created_at >= since,
+            )
+        )
+        or 0
+    )
+    remaining = settings.daily_upload_limit - used
+    if remaining <= 0:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Daily upload limit reached ({settings.daily_upload_limit} CVs/day). "
+            "Try again later.",
+        )
+    if len(files) > remaining:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Upload exceeds your remaining daily quota ({remaining} of "
+            f"{settings.daily_upload_limit} left).",
+        )
+
+    # Size pre-pass: read + validate every file before creating any row, so an
+    # oversized file rejects the batch atomically (matches the quota behavior).
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    validated: list[tuple[str, bytes]] = []
     for upload in files:
         data = await upload.read()
+        if len(data) > max_bytes:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                f"{upload.filename or 'file'}: exceeds the "
+                f"{settings.max_upload_mb} MB upload limit.",
+            )
+        validated.append((upload.filename or "untitled", data))
+
+    created: list[Candidate] = []
+    for filename, data in validated:
         candidate = Candidate(
             job_id=job.id,
             tenant_id=user.tenant_id,
-            filename=upload.filename or "untitled",
+            filename=filename,
             score_status=ScoreStatus.pending,
         )
         db.add(candidate)

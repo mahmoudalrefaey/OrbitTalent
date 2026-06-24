@@ -142,6 +142,98 @@ def test_compare_requires_two_to_four(client):
     assert client.get(f"/candidates/compare?ids={c1}").status_code == 400
 
 
+def test_apply_rules_to_existing_candidates(client):
+    """A rule added AFTER candidates were scored can be applied manually, and
+    the rule is NOT removed (keeps firing on future CVs)."""
+    # Candidate is uploaded + scored (fake deep_score → 8.0) with no rule yet,
+    # so it is not auto-rejected on upload.
+    job_id, cid = _make_job_with_candidate(client)
+    assert client.get(f"/candidates/{cid}").json()["stage"] != "rejected"
+
+    # Add a reject-under-9 rule now (job-scoped).
+    rule = client.post(
+        "/automation-rules",
+        json={
+            "name": "reject under 9",
+            "job_id": job_id,
+            "trigger_json": [{"field": "overall_score", "op": "lt", "value": 9}],
+            "action_json": {"type": "reject", "reason": "low_ai_score"},
+        },
+    ).json()
+
+    # Apply all rules to the job's current candidates.
+    r = client.post("/automation-rules/apply", json={"job_id": job_id})
+    assert r.status_code == 200, r.text
+    assert r.json()["applied"] == 1
+    assert cid in r.json()["matched_candidate_ids"]
+
+    # Candidate is now rejected, and the rule still exists.
+    detail = client.get(f"/candidates/{cid}").json()
+    assert detail["stage"] == "rejected"
+    assert detail["rejection_reason"] == "low_ai_score"
+    assert any(x["id"] == rule["id"] for x in client.get("/automation-rules").json())
+
+
+def test_apply_specific_rule_only(client):
+    """Applying a specific rule_id runs only that rule; others don't fire."""
+    job_id, cid = _make_job_with_candidate(client)
+    # Rule A: would shortlist (score >= 1 always true for 8.0).
+    a = client.post(
+        "/automation-rules",
+        json={"name": "shortlist", "job_id": job_id,
+              "trigger_json": [{"field": "overall_score", "op": "gte", "value": 1}],
+              "action_json": {"type": "move", "stage": "shortlisted"}},
+    ).json()
+    # Rule B: would reject.
+    client.post(
+        "/automation-rules",
+        json={"name": "reject", "job_id": job_id,
+              "trigger_json": [{"field": "overall_score", "op": "lt", "value": 9}],
+              "action_json": {"type": "reject", "reason": "low_ai_score"}},
+    )
+    # Apply ONLY rule A → candidate shortlisted, not rejected.
+    r = client.post("/automation-rules/apply",
+                    json={"job_id": job_id, "rule_ids": [a["id"]]})
+    assert r.status_code == 200 and r.json()["applied"] == 1
+    assert client.get(f"/candidates/{cid}").json()["stage"] == "shortlisted"
+
+
+def test_apply_rules_tenant_scoped(client):
+    """Applying rules to another tenant's job is a 404."""
+    job_id, _ = _make_job_with_candidate(client)
+    from tests.test_api import register_user
+
+    register_user(client, email="other@example.com")  # swaps the session
+    assert client.post("/automation-rules/apply", json={"job_id": job_id}).status_code == 404
+
+
+def test_upload_size_limit_413(client, monkeypatch):
+    job_id, _ = _make_job_with_candidate(client)
+    import app.routers.candidates as cand_router
+
+    monkeypatch.setattr(cand_router.settings, "max_upload_mb", 1)
+    big = io.BytesIO(b"x" * (1 * 1024 * 1024 + 1))  # just over 1 MB
+    r = client.post(
+        f"/jobs/{job_id}/candidates",
+        files=[("files", ("big.txt", big, "text/plain"))],
+    )
+    assert r.status_code == 413, r.text
+
+
+def test_daily_upload_quota_429(client, monkeypatch):
+    import app.routers.candidates as cand_router
+
+    # _make_job_with_candidate already uploaded 1 candidate.
+    monkeypatch.setattr(cand_router.settings, "daily_upload_limit", 1)
+    job_id, _ = _make_job_with_candidate(client)
+    cv = ("Bob bob@x.com +1 555 333 4444 EXPERIENCE Python. " * 10).encode()
+    r = client.post(
+        f"/jobs/{job_id}/candidates",
+        files=[("files", ("bob.txt", io.BytesIO(cv), "text/plain"))],
+    )
+    assert r.status_code == 429, r.text
+
+
 def test_automation_rule_crud_and_auto_reject(client):
     # Create an auto-reject rule: overall_score < 6 → reject low_ai_score.
     rule = client.post(
