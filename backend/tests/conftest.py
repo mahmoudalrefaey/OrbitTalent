@@ -20,6 +20,8 @@ os.environ["DATABASE_URL"] = os.environ.get(
 os.environ.setdefault("LLM_API_KEY", "")
 # Deterministic signing secret for auth tests.
 os.environ.setdefault("JWT_SECRET", "test-secret-key")
+# Disable per-IP rate limiting — the suite makes many auth calls from one client.
+os.environ["RATE_LIMIT_ENABLED"] = "false"
 # Pin cascade thresholds so tests are independent of the developer's .env tuning.
 # A permissive Tier-1 keeps the "candidate gets scored" assertions stable; the
 # Tier-1 gate firing is covered explicitly in test_cascade.py with crafted CVs.

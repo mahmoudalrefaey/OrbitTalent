@@ -17,6 +17,11 @@ from app.deps import CurrentUser
 from app.models import Tenant, User
 from app.schemas import LoginRequest, RegisterRequest, UserOut
 from app.services import auth
+from app.services.ratelimit import rate_limit
+
+# Per-IP brute-force / credential-stuffing protection (sliding window).
+_login_limit = rate_limit("login", limit=10, window_s=60)
+_register_limit = rate_limit("register", limit=5, window_s=60)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
@@ -34,7 +39,12 @@ def _set_session_cookie(response: Response, user_id: int) -> None:
     )
 
 
-@router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=UserOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(_register_limit)],
+)
 def register(
     payload: RegisterRequest,
     response: Response,
@@ -64,7 +74,11 @@ def register(
     return UserOut.model_validate(user)
 
 
-@router.post("/login", response_model=UserOut)
+@router.post(
+    "/login",
+    response_model=UserOut,
+    dependencies=[Depends(_login_limit)],
+)
 def login(
     payload: LoginRequest,
     response: Response,

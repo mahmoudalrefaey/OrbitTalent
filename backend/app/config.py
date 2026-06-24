@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     jwt_expire_days: int = 7
     cookie_secure: bool = False  # set true behind HTTPS for the Secure flag
 
+    # Per-IP rate limiting on sensitive endpoints (auth). Disabled in tests.
+    rate_limit_enabled: bool = True
+
     # --- Upload limits ------------------------------------------------------
     # Max CV uploads per user (== per tenant; users are 1:1 with tenants) in a
     # rolling 24h window, and the max size of a single uploaded file.
