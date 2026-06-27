@@ -385,7 +385,16 @@ export const api = {
       body: form,
       credentials: "include",
     });
-    if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText);
+    if (!res.ok) {
+      // Error body may be JSON (FastAPI) or HTML (nginx/Vercel/proxy error pages).
+      // Parsing blindly as JSON would throw "Unexpected token '<'" and hide the real status.
+      const body = await res.text();
+      let detail: string | undefined;
+      if (res.headers.get("content-type")?.includes("application/json")) {
+        try { detail = JSON.parse(body)?.detail; } catch { /* fall through */ }
+      }
+      throw new Error(detail ?? `Upload failed (${res.status} ${res.statusText})`);
+    }
     return res.json();
   },
 };
